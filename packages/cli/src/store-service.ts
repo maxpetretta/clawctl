@@ -84,22 +84,22 @@ export const ClawctlStoreLive = Layer.effect(
       runtimeRoot,
     } = yield* ClawctlPathsService
 
-    const ensureSharedConfig = withSystemError(
-      "store.ensureSharedConfig",
-      Effect.gen(function* () {
-        yield* withSystemError("store.makeRootDir", fs.makeDirectory(paths.rootDir, { recursive: true }))
-        yield* withSystemError("store.makeConfigDir", fs.makeDirectory(paths.configDir, { recursive: true }))
-        yield* withSystemError("store.makeCacheDir", fs.makeDirectory(paths.cacheDir, { recursive: true }))
-        yield* withSystemError("store.makeInstallDir", fs.makeDirectory(paths.installDir, { recursive: true }))
-        yield* withSystemError("store.makeRuntimeDir", fs.makeDirectory(paths.runtimeDir, { recursive: true }))
-        yield* withSystemError("store.makeLogDir", fs.makeDirectory(paths.logDir, { recursive: true }))
-        const exists = yield* fs.exists(paths.sharedConfigFile)
-        if (exists) {
-          return
-        }
-        yield* fs.writeFileString(paths.sharedConfigFile, stringifySharedConfigEntries({ ...defaultSharedConfig }))
-      }),
-    )
+    const ensureSharedConfig = Effect.gen(function* () {
+      yield* withSystemError("store.makeRootDir", fs.makeDirectory(paths.rootDir, { recursive: true }))
+      yield* withSystemError("store.makeConfigDir", fs.makeDirectory(paths.configDir, { recursive: true }))
+      yield* withSystemError("store.makeCacheDir", fs.makeDirectory(paths.cacheDir, { recursive: true }))
+      yield* withSystemError("store.makeInstallDir", fs.makeDirectory(paths.installDir, { recursive: true }))
+      yield* withSystemError("store.makeRuntimeDir", fs.makeDirectory(paths.runtimeDir, { recursive: true }))
+      yield* withSystemError("store.makeLogDir", fs.makeDirectory(paths.logDir, { recursive: true }))
+      const exists = yield* withSystemError("store.configExists", fs.exists(paths.sharedConfigFile))
+      if (exists) {
+        return
+      }
+      yield* withSystemError(
+        "store.writeDefaultConfig",
+        fs.writeFileString(paths.sharedConfigFile, stringifySharedConfigEntries({ ...defaultSharedConfig })),
+      )
+    })
     const readSharedConfig = withSystemError(
       "store.readSharedConfig",
       Effect.gen(function* () {
@@ -196,13 +196,8 @@ export const ClawctlStoreLive = Layer.effect(
         const source = yield* fs.readFileString(paths.currentFile)
         return yield* Effect.try({
           try: () => parseCurrentSelectionJson(source) as CurrentSelection,
-          catch: () => undefined,
-        }).pipe(
-          Effect.match({
-            onFailure: () => undefined,
-            onSuccess: (selection) => selection,
-          }),
-        )
+          catch: () => "parse-failed" as const,
+        }).pipe(Effect.orElseSucceed(() => undefined))
       }),
     )
     const writeCurrentSelection = Effect.fn("ClawctlStoreService.writeCurrentSelection")(function* (
@@ -239,13 +234,8 @@ export const ClawctlStoreLive = Layer.effect(
       const source = yield* withSystemError("store.readRuntimeRecord", fs.readFileString(file))
       return yield* Effect.try({
         try: () => parseRuntimeRecordJson(source) as RuntimeRecord,
-        catch: () => undefined,
-      }).pipe(
-        Effect.match({
-          onFailure: () => undefined,
-          onSuccess: (record) => record,
-        }),
-      )
+        catch: () => "parse-failed" as const,
+      }).pipe(Effect.orElseSucceed(() => undefined))
     })
     const writeRuntimeRecord = Effect.fn("ClawctlStoreService.writeRuntimeRecord")(function* (record: RuntimeRecord) {
       const root = runtimeRoot(record.implementation, record.version, record.backend)
