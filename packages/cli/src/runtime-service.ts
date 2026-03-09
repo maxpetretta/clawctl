@@ -6,23 +6,19 @@ import { fileURLToPath } from "node:url"
 import * as Command from "@effect/platform/Command"
 import * as CommandExecutor from "@effect/platform/CommandExecutor"
 import * as FileSystem from "@effect/platform/FileSystem"
-import { BunContext } from "@effect/platform-bun"
 import { Context, Effect, Layer, type Option } from "effect"
 
-import {
-  getRegisteredImplementation,
-  installOnlyInteractionMessage,
-  isInstallOnlyRegistration,
-} from "./adapter/registry.ts"
+import { installOnlyInteractionMessage, isInstallOnlyRegistration } from "./adapter/registry.ts"
 import { repairPythonScriptShebang } from "./installer-service.ts"
 import type { RuntimeManifest } from "./adapter/schema.ts"
 import type { InstallRecord, RegisteredImplementation, RuntimeRecord } from "./adapter/types.ts"
+import { BunContext } from "@effect/platform-bun"
 import { type ClawctlError, userError, withSystemError } from "./errors.ts"
 import { ClawctlPathsLive, ClawctlPathsService } from "./paths-service.ts"
+import { makeParseReference, makeRequireInteractableImplementation, makeResolveRegistration } from "./service-helpers.ts"
 import { missingSharedConfigKeys, sharedConfigToEntries } from "./shared-config.ts"
 import { ClawctlStoreLive, ClawctlStoreService } from "./store-service.ts"
 import type { TargetReference } from "./target.ts"
-import { parseTargetReference } from "./target.ts"
 
 const daemonSentinel = "__daemon__"
 const shimSentinel = "__shim__"
@@ -260,30 +256,11 @@ export const ClawctlRuntimeLive = Layer.effect(
       runtimeWorkspaceDir,
     } = yield* ClawctlPathsService
     const store = yield* ClawctlStoreService
-    const resolveRegistration = Effect.fn("ClawctlRuntimeService.resolveRegistration")(function* (
-      implementation: string,
-    ) {
-      return yield* Effect.try({
-        try: () => getRegisteredImplementation(implementation),
-        catch: (cause) =>
-          userError("runtime.resolveRegistration", cause instanceof Error ? cause.message : String(cause)),
-      })
-    })
-    const parseReference = Effect.fn("ClawctlRuntimeService.parseReference")(function* (target: string) {
-      return yield* Effect.try({
-        try: () => parseTargetReference(target),
-        catch: (cause) =>
-          userError("runtime.parseTargetReference", cause instanceof Error ? cause.message : String(cause)),
-      })
-    })
-    const requireInteractableImplementation = Effect.fn("ClawctlRuntimeService.requireInteractableImplementation")(
-      function* (implementation: string, action: string) {
-        const registration = yield* resolveRegistration(implementation)
-        if (isInstallOnlyRegistration(registration)) {
-          return yield* userError(`runtime.${action}`, installOnlyInteractionMessage(implementation))
-        }
-        return registration
-      },
+    const resolveRegistration = makeResolveRegistration("ClawctlRuntimeService")
+    const parseReference = makeParseReference("ClawctlRuntimeService")
+    const requireInteractableImplementation = makeRequireInteractableImplementation(
+      "ClawctlRuntimeService",
+      resolveRegistration,
     )
     const resolveRuntime = Effect.fn("ClawctlRuntimeService.resolveRuntime")(function* (record: InstallRecord) {
       const registration = yield* resolveRegistration(record.implementation)
@@ -447,7 +424,7 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
         return undefined
       }
       return yield* withSystemError("runtime.readLogSource", fs.readFileString(logFile)).pipe(
-        Effect.catchAll(() => Effect.void),
+        Effect.catchAll(() => Effect.succeed(undefined)),
       )
     })
 
@@ -1030,7 +1007,8 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
         "ensureActiveChatTarget",
       )
       if (!registration.manifest.capabilities[capability]) {
-        const detail = registration.messagingUnavailableReason ? ` (${registration.messagingUnavailableReason})` : ""
+        const reason = (registration as { messagingUnavailableReason?: string }).messagingUnavailableReason
+        const detail = reason ? ` (${reason})` : ""
         return yield* userError(
           "runtime.ensureActiveChatTarget",
           `implementation does not support ${capability}: ${record.implementation}${detail}`,
@@ -1265,17 +1243,23 @@ function parseShimArgs(argv: string[]): ShimArgs | undefined {
   }
 }
 
+function makeSelfContainedLayer() {
+  const baseLayer = BunContext.layer
+  const runtimePathsLayer = ClawctlPathsLive.pipe(Layer.provide(baseLayer))
+  const runtimeStoreLayer = ClawctlStoreLive.pipe(Layer.provide(Layer.mergeAll(baseLayer, runtimePathsLayer)))
+  const runtimeLayer = ClawctlRuntimeLive.pipe(
+    Layer.provide(Layer.mergeAll(baseLayer, runtimePathsLayer, runtimeStoreLayer)),
+  )
+  return Layer.mergeAll(baseLayer, runtimePathsLayer, runtimeStoreLayer, runtimeLayer)
+}
+
 export async function maybeRunManagedDaemon(argv: string[]): Promise<boolean> {
   const parsed = parseDaemonArgs(argv)
   if (!parsed) {
     return false
   }
 
-  const baseLayer = BunContext.layer
-  const pathsLayer = ClawctlPathsLive.pipe(Layer.provide(baseLayer))
-  const storeLayer = ClawctlStoreLive.pipe(Layer.provide(Layer.mergeAll(baseLayer, pathsLayer)))
-  const runtimeLayer = ClawctlRuntimeLive.pipe(Layer.provide(Layer.mergeAll(baseLayer, pathsLayer, storeLayer)))
-  const layer = Layer.mergeAll(baseLayer, pathsLayer, storeLayer, runtimeLayer)
+  const layer = makeSelfContainedLayer()
   const provided = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.provide(layer as never))
   const daemonServicesEffect = Effect.gen(function* () {
     return {
@@ -1380,11 +1364,7 @@ export async function maybeRunShimmedCommand(argv: string[]): Promise<boolean> {
     return false
   }
 
-  const baseLayer = BunContext.layer
-  const pathsLayer = ClawctlPathsLive.pipe(Layer.provide(baseLayer))
-  const storeLayer = ClawctlStoreLive.pipe(Layer.provide(Layer.mergeAll(baseLayer, pathsLayer)))
-  const runtimeLayer = ClawctlRuntimeLive.pipe(Layer.provide(Layer.mergeAll(baseLayer, pathsLayer, storeLayer)))
-  const layer = Layer.mergeAll(baseLayer, pathsLayer, storeLayer, runtimeLayer)
+  const layer = makeSelfContainedLayer()
   const runtimeServicesEffect = Effect.gen(function* () {
     return {
       runtime: yield* ClawctlRuntimeService,
