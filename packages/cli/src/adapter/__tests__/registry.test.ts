@@ -82,8 +82,6 @@ describe("adapter registry", () => {
       }),
     ).toEqual({
       HOME: "/tmp/home",
-      NULLCLAW_HOME: "/tmp/home/.nullclaw",
-      NULLCLAW_WORKSPACE: "/tmp/workspace",
       CLAWCTL_INSTALL_ROOT: "/tmp/install",
     })
     expect(

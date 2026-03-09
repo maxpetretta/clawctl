@@ -913,12 +913,19 @@ describe("tier 1 clawctl cli", () => {
       const configText = await Bun.file(
         join(root, "runtimes", "local", "nullclaw", "v2026.3.7", "home", ".nullclaw", "config.json"),
       ).text()
+      const { stdout } = await execFileAsync(implementationShim, ["agent", "-m", "hello-shim"], {
+        env: {
+          ...process.env,
+          CLAWCTL_ROOT: root,
+        },
+      })
 
       expect(await Bun.file(activeShim).exists()).toBe(true)
       expect(await Bun.file(implementationShim).exists()).toBe(true)
       expect(configText).toContain('"telegram"')
       expect(configText).toContain('"bot_token": "telegram-token"')
       expect(configText).toContain('"allow_from": ["12345","67890"]')
+      expect(stdout.trim()).toBe("reply:hello-shim")
     } finally {
       await cleanupRoot(root)
     }

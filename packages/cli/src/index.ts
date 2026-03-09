@@ -6,7 +6,7 @@ import { BunContext, BunRuntime } from "@effect/platform-bun"
 import { Effect, Layer } from "effect"
 
 import { resolveRuntime, runtimeBackends } from "./model.ts"
-import { maybeRunManagedDaemon } from "./runtime-service.ts"
+import { maybeRunManagedDaemon, maybeRunShimmedCommand } from "./runtime-service.ts"
 import { ClawctlLive, ClawctlService } from "./service.ts"
 
 const runtimeOption = Options.choice("runtime", runtimeBackends).pipe(
@@ -153,6 +153,7 @@ const MainLayer = ClawctlLive.pipe(
 )
 
 const handledDaemon = await maybeRunManagedDaemon(process.argv)
-if (!handledDaemon) {
+const handledShim = handledDaemon ? false : await maybeRunShimmedCommand(process.argv)
+if (!(handledDaemon || handledShim)) {
   cli(process.argv).pipe(Effect.provide(MainLayer), BunRuntime.runMain)
 }

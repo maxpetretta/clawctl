@@ -20,6 +20,7 @@ import type { TargetReference } from "./target.ts"
 import { parseTargetReference } from "./target.ts"
 
 const daemonSentinel = "__daemon__"
+const shimSentinel = "__shim__"
 const daemonStartupPolls = 50
 const daemonStartupSleep = "100 millis"
 
@@ -45,6 +46,10 @@ type ClawctlRuntimeApi = {
   readonly prepareRuntime: (record: InstallRecord) => Effect.Effect<void, ClawctlError>
   readonly requestChat: (record: InstallRecord, message: string) => Effect.Effect<string, ClawctlError>
   readonly runChatDirect: (record: InstallRecord, message: string) => Effect.Effect<string, ClawctlError>
+  readonly runShimmedCommand: (
+    implementation: string,
+    args: ReadonlyArray<string>,
+  ) => Effect.Effect<number, ClawctlError>
   readonly pingText: () => string
   readonly runtimeState: (record: InstallRecord) => Effect.Effect<RuntimeSnapshot, ClawctlError>
   readonly stopSelection: (target: Option.Option<string>) => Effect.Effect<StopSelectionResult, ClawctlError>
@@ -257,13 +262,14 @@ export const ClawctlRuntimeLive = Layer.effect(
       record: InstallRecord,
       previousImplementation?: string,
     ) {
-      const [command, ...fixedArgs] = record.entrypointCommand
+      const invocation = currentProgramCommand()
+      const [command, ...fixedArgs] = [invocation.command, ...invocation.args]
       if (!command) {
         return yield* userError("runtime.updateActiveShims", `missing binary for ${record.implementation}`)
       }
 
       const wrapper = `#!/bin/sh
-exec ${[command, ...fixedArgs].map(shellQuote).join(" ")} "$@"
+CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSentinel, record.implementation].map(shellQuote).join(" ")} "$@"
 `
 
       yield* withSystemError("runtime.makeBinDir", fs.makeDirectory(paths.binDir, { recursive: true }))
@@ -907,6 +913,76 @@ exec ${[command, ...fixedArgs].map(shellQuote).join(" ")} "$@"
       return output
     })
 
+    const runShimmedCommand = Effect.fn("ClawctlRuntimeService.runShimmedCommand")(function* (
+      implementation: string,
+      args: ReadonlyArray<string>,
+    ) {
+      const current = yield* store.readCurrentSelection
+      if (!current) {
+        return yield* userError("runtime.runShimmedCommand", "no active claw selected")
+      }
+      if (current.implementation !== implementation) {
+        return yield* userError(
+          "runtime.runShimmedCommand",
+          `shim target is not active: ${implementation} (active: ${current.implementation})`,
+        )
+      }
+
+      const record = yield* store.resolveInstalledRecord(current.implementation, current.version)
+      const { registration } = yield* resolveRuntime(record)
+      const configEntries = yield* resolveSharedConfigEntries()
+      const runtimeRecord = yield* readHealthyRuntimeRecord(record)
+      const homeDir = runtimeHomeDir(record.implementation, record.resolvedVersion)
+      const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion)
+      const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion)
+      const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion)
+      yield* renderRuntimeConfig(record)
+
+      const env = {
+        ...process.env,
+        ...(yield* Effect.try({
+          try: () =>
+            registration.implementationHooks.runtimeEnv({
+              config: configEntries,
+              homeDir,
+              installRoot: record.installRoot,
+              runtimeDir,
+              stateDir,
+              workspaceDir,
+              ...(runtimeRecord?.port === undefined ? {} : { port: runtimeRecord.port }),
+            }),
+          catch: (cause) =>
+            userError("runtime.runShimmedCommand", cause instanceof Error ? cause.message : String(cause)),
+        })),
+        CLAWCTL_ROOT: paths.rootDir,
+      }
+
+      const [file, ...fixedArgs] = record.entrypointCommand
+      if (!file) {
+        return yield* userError("runtime.runShimmedCommand", `missing binary for ${record.implementation}`)
+      }
+
+      const child = yield* Effect.try({
+        try: () =>
+          spawn(file, [...fixedArgs, ...args], {
+            cwd: workspaceDir,
+            env,
+            stdio: "inherit",
+          }),
+        catch: (cause) => userError("runtime.runShimmedCommand", String(cause)),
+      })
+      return yield* Effect.tryPromise({
+        try: () =>
+          new Promise<number>((resolvePromise, reject) => {
+            child.once("error", reject)
+            child.once("exit", (code) => {
+              resolvePromise(code ?? 1)
+            })
+          }),
+        catch: (cause) => userError("runtime.runShimmedCommand", String(cause)),
+      })
+    })
+
     const runtimeState = Effect.fn("ClawctlRuntimeService.runtimeState")(function* (record: InstallRecord) {
       const runtimeRecord = yield* readHealthyRuntimeRecord(record)
       if (!runtimeRecord) {
@@ -969,6 +1045,7 @@ exec ${[command, ...fixedArgs].map(shellQuote).join(" ")} "$@"
       prepareRuntime: renderRuntimeConfig,
       requestChat,
       runChatDirect,
+      runShimmedCommand,
       pingText: () => "Reply with exactly the single word pong.",
       runtimeState,
       stopSelection,
@@ -980,6 +1057,11 @@ type DaemonArgs = {
   backend: string
   implementation: string
   version: string
+}
+
+type ShimArgs = {
+  implementation: string
+  args: string[]
 }
 
 function parseDaemonArgs(argv: string[]): DaemonArgs | undefined {
@@ -997,6 +1079,21 @@ function parseDaemonArgs(argv: string[]): DaemonArgs | undefined {
     backend,
     implementation,
     version,
+  }
+}
+
+function parseShimArgs(argv: string[]): ShimArgs | undefined {
+  const sentinelIndex = argv.indexOf(shimSentinel)
+  if (sentinelIndex < 0) {
+    return undefined
+  }
+  const implementation = argv[sentinelIndex + 1]
+  if (!implementation) {
+    return undefined
+  }
+  return {
+    implementation,
+    args: argv.slice(sentinelIndex + 2),
   }
 }
 
@@ -1106,5 +1203,35 @@ export async function maybeRunManagedDaemon(argv: string[]): Promise<boolean> {
   await new Promise<void>(() => {
     // Keep the managed daemon alive until it receives a signal.
   })
+  return true
+}
+
+export async function maybeRunShimmedCommand(argv: string[]): Promise<boolean> {
+  const parsed = parseShimArgs(argv)
+  if (!parsed) {
+    return false
+  }
+
+  const baseLayer = BunContext.layer
+  const pathsLayer = ClawctlPathsLive.pipe(Layer.provide(baseLayer))
+  const storeLayer = ClawctlStoreLive.pipe(Layer.provide(Layer.mergeAll(baseLayer, pathsLayer)))
+  const runtimeLayer = ClawctlRuntimeLive.pipe(Layer.provide(Layer.mergeAll(baseLayer, pathsLayer, storeLayer)))
+  const layer = Layer.mergeAll(baseLayer, pathsLayer, storeLayer, runtimeLayer)
+  const runtimeServicesEffect = Effect.gen(function* () {
+    return {
+      runtime: yield* ClawctlRuntimeService,
+    }
+  }).pipe(Effect.provide(layer as never)) as unknown as Effect.Effect<{ runtime: ClawctlRuntimeApi }, never, never>
+
+  try {
+    const { runtime } = await Effect.runPromise(runtimeServicesEffect)
+    const exitCode = await Effect.runPromise(runtime.runShimmedCommand(parsed.implementation, parsed.args))
+    process.exitCode = exitCode
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    console.error(detail)
+    process.exitCode = 1
+  }
+
   return true
 }

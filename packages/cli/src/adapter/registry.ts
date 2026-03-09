@@ -536,32 +536,26 @@ const nullclawRegistration = {
         }),
       },
     ],
-    runtimeEnv: ({ homeDir, installRoot, workspaceDir }) => ({
+    runtimeEnv: ({ homeDir, installRoot }) => ({
       HOME: homeDir,
-      NULLCLAW_HOME: resolve(homeDir, ".nullclaw"),
-      NULLCLAW_WORKSPACE: workspaceDir,
       CLAWCTL_INSTALL_ROOT: installRoot,
     }),
-    start: ({ binaryPath, homeDir, installRoot, runtimeDir, stateDir, workspaceDir }) =>
+    start: ({ binaryPath, homeDir, installRoot, runtimeDir, stateDir }) =>
       Promise.resolve({
         command: binaryPath,
         args: ["gateway"],
         env: {
           HOME: homeDir,
-          NULLCLAW_HOME: resolve(homeDir, ".nullclaw"),
-          NULLCLAW_WORKSPACE: workspaceDir,
           CLAWCTL_INSTALL_ROOT: installRoot,
           CLAWCTL_RUNTIME_DIR: runtimeDir,
           CLAWCTL_STATE_DIR: stateDir,
         },
       }),
-    status: async ({ binaryPath, homeDir, installRoot, runtimeDir, stateDir, workspaceDir }) => {
+    status: async ({ binaryPath, homeDir, installRoot, runtimeDir, stateDir }) => {
       const child = Bun.spawn([binaryPath, "status"], {
         env: {
           ...process.env,
           HOME: homeDir,
-          NULLCLAW_HOME: resolve(homeDir, ".nullclaw"),
-          NULLCLAW_WORKSPACE: workspaceDir,
           CLAWCTL_INSTALL_ROOT: installRoot,
           CLAWCTL_RUNTIME_DIR: runtimeDir,
           CLAWCTL_STATE_DIR: stateDir,
