@@ -1161,6 +1161,22 @@ describe("tier 1 clawctl cli", () => {
     }
   })
 
+  test("list shows simple installed state without support tiers", async () => {
+    const root = await createTempRoot()
+    try {
+      await runCli(root, ["install", "nullclaw@v2026.3.7"])
+
+      const output = await runCli(root, ["list"])
+      expect(output).toContain("nullclaw: v2026.3.7")
+      expect(output).toContain("openclaw: not installed")
+      expect(output).toContain("hermes: not installed")
+      expect(output).not.toContain("(tier")
+      expect(output).not.toContain("  installed:")
+    } finally {
+      await cleanupRoot(root)
+    }
+  })
+
   test("use starts a managed runtime, stop stops it, and switching claws stops the previous runtime", async () => {
     const root = await createTempRoot()
     try {
