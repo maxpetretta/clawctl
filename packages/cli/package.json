@@ -1,0 +1,26 @@
+{
+  "name": "@clawctl/cli",
+  "version": "2026.3.8",
+  "description": "Effect-based claw runtime manager CLI",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "clawctl": "src/index.ts"
+  },
+  "scripts": {
+    "build": "bun build --compile src/index.ts --outfile dist/clawctl",
+    "start": "bun run src/index.ts",
+    "dev": "bun run src/index.ts",
+    "lint": "biome check . && tsgo --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@effect/cli": "0.73.2",
+    "@effect/platform-node": "0.104.1",
+    "effect": "3.19.19"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

@@ -1,0 +1,28 @@
+# dependencies
+node_modules
+
+# bun
+bun.lockb
+
+# build artifacts
+dist
+out
+coverage
+.astro
+*.tgz
+*.tsbuildinfo
+
+# runtime data
+.clawctl
+**/.clawctl
+
+# env
+.env
+.env.*
+
+# os/editor
+.DS_Store
+**/.DS_Store
+.idea
+.cache
+.eslintcache

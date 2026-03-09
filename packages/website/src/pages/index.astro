@@ -1,0 +1,91 @@
+---
+import "@/styles/global.css"
+
+const title = "clawctl | Runtime manager for claws"
+const description =
+  "Install multiple claw implementations, switch the active runtime, and share credentials across local and Docker backends."
+
+const pillars = [
+  {
+    title: "Versioned installs",
+    copy: "Download multiple claw versions into one controlled root instead of scattering tool state across your machine.",
+  },
+  {
+    title: "One active claw",
+    copy: "Switch the active implementation like a language version manager, with a clear current runtime and shared config.",
+  },
+  {
+    title: "Shared credentials",
+    copy: "Keep provider keys and Telegram bot settings in one place and render claw-native config from there.",
+  },
+]
+
+const packages = [
+  { name: "@clawctl/cli", copy: "Effect-based command-line runtime manager." },
+  { name: "@clawctl/skill", copy: "Agent skill for using clawctl in automated workflows." },
+  { name: "@clawctl/website", copy: "Static Astro site for product docs and project framing." },
+]
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#111318" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">claw runtime management</p>
+        <h1>One root. Many claws. One active runtime.</h1>
+        <p class="lede">
+          `clawctl` is a local-first runtime manager for claw implementations. Install versions, switch the active
+          claw, and keep shared credentials in one place.
+        </p>
+
+        <div class="terminal-card" aria-label="Example clawctl session">
+          <pre><code>$ clawctl install openclaw@2026.3.7
+$ clawctl use openclaw@2026.3.7
+$ clawctl current
+openclaw@2026.3.7 (local)</code></pre>
+        </div>
+      </section>
+
+      <section class="grid-section">
+        {pillars.map((pillar) => (
+          <article class="panel">
+            <h2>{pillar.title}</h2>
+            <p>{pillar.copy}</p>
+          </article>
+        ))}
+      </section>
+
+      <section class="split-section">
+        <div class="panel panel-heavy">
+          <p class="section-label">core workflow</p>
+          <ol>
+            <li>Install a claw version under the shared clawctl root.</li>
+            <li>Render claw-native config from shared credentials.</li>
+            <li>Mark one runtime as active and route direct commands to it.</li>
+            <li>Add Docker later without changing the top-level workflow.</li>
+          </ol>
+        </div>
+
+        <div class="panel">
+          <p class="section-label">workspace packages</p>
+          <ul>
+            {packages.map((item) => (
+              <li>
+                <strong>{item.name}</strong>
+                <span>{item.copy}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

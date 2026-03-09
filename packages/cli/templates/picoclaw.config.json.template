@@ -1,0 +1,30 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "{{WORKSPACE_DIR}}",
+      "restrict_to_workspace": true,
+      "model": "bench",
+      "max_tokens": 4096,
+      "temperature": 0,
+      "max_tool_iterations": 4
+    }
+  },
+  "model_list": [
+    {
+      "model_name": "bench",
+      "model": "{{CLAW_MODEL}}",
+      "api_base": "{{CLAW_BASE_URL}}",
+      "api_key": "{{CLAW_API_KEY}}",
+      "request_timeout": 300
+    }
+  ],
+  "tools": {
+    "web": {
+      "brave": { "enabled": false, "api_key": "", "max_results": 0 },
+      "tavily": { "enabled": false, "api_key": "", "max_results": 0 },
+      "duckduckgo": { "enabled": false, "max_results": 0 },
+      "perplexity": { "enabled": false, "api_key": "", "max_results": 0 },
+      "searxng": { "enabled": false, "base_url": "", "max_results": 0 }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@clawctl/skill",
+  "version": "2026.3.8",
+  "description": "Agent skill for using clawctl to install, select, and inspect claws",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "files": [
+    "clawctl"
+  ],
+  "clawhub": {
+    "skill": {
+      "entry": "clawctl/SKILL.md"
+    }
+  }
+}

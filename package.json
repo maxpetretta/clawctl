@@ -1,0 +1,24 @@
+{
+  "name": "clawctl-workspace",
+  "private": true,
+  "workspaces": ["packages/cli", "packages/skill", "packages/website"],
+  "scripts": {
+    "cli": "bun run --cwd packages/cli start",
+    "cli:build": "bun run --cwd packages/cli build",
+    "cli:help": "bun run --cwd packages/cli start --help",
+    "web": "bun run --cwd packages/website dev",
+    "web:dev": "bun run --cwd packages/website dev",
+    "web:build": "bun run --cwd packages/website build",
+    "web:preview": "bun run --cwd packages/website preview",
+    "lint:cli": "bun run --cwd packages/cli lint",
+    "lint:web": "bun run --cwd packages/website lint",
+    "lint": "bun run lint:cli && bun run lint:web",
+    "fix": "biome check --write --unsafe ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.3",
+    "@typescript/native-preview": "7.0.0-dev.20260219.1",
+    "effect-solutions": "^0.4.13",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "workspace": "{{WORKSPACE_DIR}}",
+  "models": {
+    "providers": {
+      "bench": {
+        "api_key": "{{CLAW_API_KEY}}",
+        "base_url": "{{CLAW_BASE_URL}}"
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "bench/{{CLAW_MODEL}}"
+      },
+      "heartbeat": {
+        "enabled": false,
+        "every": "30m"
+      }
+    }
+  },
+  "scheduler": {
+    "enabled": false,
+    "max_tasks": 32,
+    "max_concurrent": 1,
+    "agent_timeout_secs": 30
+  },
+  "channels": {
+    "cli": true
+  },
+  "autonomy": {
+    "level": "supervised",
+    "workspace_only": true,
+    "max_actions_per_hour": 20
+  }
+}

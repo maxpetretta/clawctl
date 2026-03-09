@@ -1,0 +1,43 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "{{WORKSPACE_DIR}}",
+      "model": "{{CLAW_MODEL}}",
+      "provider": "custom",
+      "maxTokens": 4096,
+      "temperature": 0,
+      "maxToolIterations": 1,
+      "memoryWindow": 20
+    }
+  },
+  "channels": {
+    "sendProgress": false,
+    "sendToolHints": false,
+    "whatsapp": { "enabled": false },
+    "telegram": { "enabled": false },
+    "discord": { "enabled": false },
+    "feishu": { "enabled": false },
+    "mochat": { "enabled": false },
+    "dingtalk": { "enabled": false },
+    "email": { "enabled": false },
+    "slack": { "enabled": false },
+    "qq": { "enabled": false },
+    "matrix": { "enabled": false }
+  },
+  "providers": {
+    "custom": {
+      "apiKey": "{{CLAW_API_KEY}}",
+      "apiBase": "{{CLAW_BASE_URL}}"
+    }
+  },
+  "tools": {
+    "restrictToWorkspace": true,
+    "web": {
+      "search": {
+        "apiKey": "",
+        "maxResults": 0
+      }
+    },
+    "mcpServers": {}
+  }
+}
