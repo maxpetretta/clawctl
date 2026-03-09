@@ -255,8 +255,9 @@ Tier 3:
 Current Tier 3 behavior:
 
 - `nanoclaw` and `bitclaw` are installable through `repo-bootstrap`
-- `nanoclaw` and `bitclaw` support `use`, `status`, and `stop` through native daemon supervision
-- `nanoclaw` and `bitclaw` do not support `chat` or `ping` yet
+- `nanoclaw` supports `use`, `status`, and `stop` through native daemon supervision
+- `nanoclaw` does not support `chat` or `ping` because upstream does not expose a stable local loopback or host-side chat transport
+- `bitclaw` supports `use`, `status`, `stop`, `chat`, and `ping` through its host-side IPC transport
 - `ironclaw` is installable through a release-backed local adapter
 - `ironclaw` is not activatable through `use`
 - `piclaw` is registered as Docker-first metadata only

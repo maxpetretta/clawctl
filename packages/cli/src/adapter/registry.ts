@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs"
-import { dirname, resolve } from "node:path"
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { basename, dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import type {
@@ -91,6 +91,7 @@ type ImplementationHook = {
 }
 
 type AdapterRegistration = RegisteredImplementation & {
+  messagingUnavailableReason?: string
   hooks: {
     buildChatCommand: true
     chat?: true
@@ -154,6 +155,116 @@ function loadTemplate(templateName: string): Promise<string> {
 async function renderTemplate(templateName: string, replacements: Record<string, string>): Promise<string> {
   const template = await loadTemplate(templateName)
   return template.replaceAll(/\{\{([A-Z0-9_]+)\}\}/gu, (_match, key: string) => replacements[key] ?? "")
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolvePromise) => {
+    setTimeout(resolvePromise, ms)
+  })
+}
+
+function bitclawIpcPaths(homeDir: string) {
+  const ipcDir = resolve(homeDir, "ipc")
+  return {
+    archiveDir: resolve(ipcDir, "archive"),
+    inboundDir: resolve(ipcDir, "inbound"),
+    outboundDir: resolve(ipcDir, "outbound"),
+  }
+}
+
+function listSortedJsonFiles(targetDir: string): string[] {
+  if (!existsSync(targetDir)) {
+    return []
+  }
+  return readdirSync(targetDir)
+    .filter((file) => file.endsWith(".json"))
+    .sort()
+    .map((file) => resolve(targetDir, file))
+}
+
+function archiveBitclawFile(archiveDir: string, filePath: string): void {
+  mkdirSync(archiveDir, { recursive: true })
+  renameSync(filePath, resolve(archiveDir, basename(filePath)))
+}
+
+function writeBitclawInboundMessage(homeDir: string, message: string): void {
+  const { inboundDir } = bitclawIpcPaths(homeDir)
+  mkdirSync(inboundDir, { recursive: true })
+  const unixSeconds = Math.floor(Date.now() / 1000)
+  const rand7 = Math.random().toString(36).slice(2, 9).padEnd(7, "0").slice(0, 7)
+  const fileName = `${unixSeconds}_in_${rand7}.json`
+  const finalPath = resolve(inboundDir, fileName)
+  const tmpPath = `${finalPath}.tmp`
+  writeFileSync(
+    tmpPath,
+    JSON.stringify(
+      {
+        type: "messages",
+        text: message,
+        timestamp: new Date().toISOString(),
+      },
+      null,
+      2,
+    ),
+  )
+  renameSync(tmpPath, finalPath)
+}
+
+function clearBitclawOutbound(homeDir: string): void {
+  const { archiveDir, outboundDir } = bitclawIpcPaths(homeDir)
+  for (const staleFile of listSortedJsonFiles(outboundDir)) {
+    archiveBitclawFile(archiveDir, staleFile)
+  }
+}
+
+function formatBitclawOutbound(event: Record<string, unknown>): string | undefined {
+  if (event.type === "result") {
+    const status = String(event.status ?? "unknown")
+    if (status === "error") {
+      return `[error] ${String(event.error ?? "Unknown error")}`
+    }
+    return String(event.result ?? "").trimEnd()
+  }
+  if (event.type === "message") {
+    return String(event.text ?? "")
+  }
+  return undefined
+}
+
+async function readBitclawResponse(homeDir: string, timeoutMs = 60_000): Promise<string> {
+  const { archiveDir, outboundDir } = bitclawIpcPaths(homeDir)
+  const deadline = Date.now() + timeoutMs
+  let lastMessage: string | undefined
+  while (Date.now() < deadline) {
+    const files = listSortedJsonFiles(outboundDir)
+    if (files.length === 0) {
+      await sleep(200)
+      continue
+    }
+
+    for (const filePath of files) {
+      try {
+        const parsed = JSON.parse(readFileSync(filePath, "utf8")) as Record<string, unknown>
+        const output = formatBitclawOutbound(parsed)
+        archiveBitclawFile(archiveDir, filePath)
+        if (!output) {
+          continue
+        }
+        if (parsed.type === "result") {
+          return output.trim()
+        }
+        lastMessage = output.trim()
+      } catch {
+        archiveBitclawFile(archiveDir, filePath)
+      }
+    }
+    if (lastMessage) {
+      return lastMessage
+    }
+    await sleep(200)
+  }
+
+  throw new Error("timed out waiting for bitclaw response")
 }
 
 function makeReleaseBackend(input: BackendManifest["install"][number], runtime: RuntimeManifest): BackendManifest {
@@ -784,6 +895,8 @@ const nanobotRegistration = {
 } satisfies AdapterRegistration
 
 const nanoclawRegistration = {
+  messagingUnavailableReason:
+    "nanoclaw does not expose a stable local loopback or host-side chat transport yet; only lifecycle control is available",
   manifest: {
     id: "nanoclaw",
     displayName: "NanoClaw",
@@ -888,8 +1001,6 @@ const bitclawRegistration = {
     repository: "https://github.com/NickTikhonov/bitclaw",
     docsUrl: "https://github.com/NickTikhonov/bitclaw",
     capabilities: makeCapabilities({
-      chat: false,
-      ping: false,
       telegram: true,
     }),
     config: makeConfig([], []),
@@ -914,6 +1025,7 @@ const bitclawRegistration = {
   } satisfies ImplementationManifest,
   hooks: {
     buildChatCommand: true,
+    chat: true,
     install: true,
     resolveVersions: true,
     renderConfig: true,
@@ -934,12 +1046,43 @@ const bitclawRegistration = {
       if ((await install.exited) !== 0) {
         throw new Error("bitclaw bootstrap failed during npm ci")
       }
+      await Bun.write(
+        resolve(repoDir, "clawctl-daemon.ts"),
+        `import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { startContainer, stopContainer } from "./src/runtime.ts";
+
+const projectRoot = dirname(fileURLToPath(import.meta.url));
+startContainer(projectRoot);
+
+const shutdown = () => {
+  try {
+    stopContainer();
+  } finally {
+    process.exit(0);
+  }
+};
+
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+setInterval(() => {}, 1000);
+`,
+      )
       return {
-        entrypointCommand: ["node", resolve(repoDir, "node_modules", "tsx", "dist", "cli.mjs")],
+        entrypointCommand: [
+          "node",
+          resolve(repoDir, "node_modules", "tsx", "dist", "cli.mjs"),
+          resolve(repoDir, "clawctl-daemon.ts"),
+        ],
       }
     },
     resolveVersions: async () => ["main"],
     renderConfig: async () => [],
+    chat: ({ homeDir, message }) => {
+      clearBitclawOutbound(homeDir)
+      writeBitclawInboundMessage(homeDir, message)
+      return readBitclawResponse(homeDir)
+    },
     runtimeEnv: ({ homeDir, installRoot }) => ({
       HOME: homeDir,
       BITCLAW_HOME: homeDir,
@@ -950,7 +1093,10 @@ const bitclawRegistration = {
     start: ({ installRoot, homeDir, runtimeDir, stateDir, workspaceDir }) =>
       Promise.resolve({
         command: "node",
-        args: [resolve(installRoot, "repo", "node_modules", "tsx", "dist", "cli.mjs"), "src/main.ts"],
+        args: [
+          resolve(installRoot, "repo", "node_modules", "tsx", "dist", "cli.mjs"),
+          resolve(installRoot, "repo", "clawctl-daemon.ts"),
+        ],
         env: {
           HOME: homeDir,
           BITCLAW_HOME: homeDir,

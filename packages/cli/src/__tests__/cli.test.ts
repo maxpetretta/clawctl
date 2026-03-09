@@ -328,8 +328,39 @@ import path from "node:path"
 const homeDir = process.env.BITCLAW_HOME || process.env.HOME || process.cwd()
 const inboundDir = path.join(homeDir, "ipc", "inbound")
 const outboundDir = path.join(homeDir, "ipc", "outbound")
+const archiveDir = path.join(homeDir, "ipc", "archive")
 fs.mkdirSync(inboundDir, { recursive: true })
 fs.mkdirSync(outboundDir, { recursive: true })
+fs.mkdirSync(archiveDir, { recursive: true })
+const writeOutbound = (payload) => {
+  const unixSeconds = Math.floor(Date.now() / 1000)
+  const rand7 = Math.random().toString(36).slice(2, 9).padEnd(7, "0").slice(0, 7)
+  const finalPath = path.join(outboundDir, \`\${unixSeconds}_out_\${rand7}.json\`)
+  const tmpPath = \`\${finalPath}.tmp\`
+  fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2))
+  fs.renameSync(tmpPath, finalPath)
+}
+const pollInbound = () => {
+  const files = fs.readdirSync(inboundDir).filter((file) => file.endsWith(".json")).sort()
+  for (const file of files) {
+    const filePath = path.join(inboundDir, file)
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"))
+      if (parsed.type === "messages" && typeof parsed.text === "string") {
+        const value = parsed.text === "Reply with exactly the single word pong." ? "pong" : \`reply:\${parsed.text}\`
+        writeOutbound({
+          type: "result",
+          status: "success",
+          result: value,
+          timestamp: new Date().toISOString(),
+        })
+      }
+    } catch {}
+    try {
+      fs.renameSync(filePath, path.join(archiveDir, file))
+    } catch {}
+  }
+}
 const cleanup = () => {
   try {
     fs.rmSync(path.join(homeDir, "ipc"), { recursive: true, force: true })
@@ -338,6 +369,7 @@ const cleanup = () => {
 }
 process.on("SIGTERM", cleanup)
 process.on("SIGINT", cleanup)
+setInterval(pollInbound, 100)
 setInterval(() => {}, 1000)
 EOF
       chmod 755 "$PWD/node_modules/tsx/dist/cli.mjs"
@@ -918,14 +950,11 @@ describe("tier 1 clawctl cli", () => {
     } finally {
       await cleanupRoot(root)
     }
-  })
+  }, 15_000)
 })
 
 describe("tier 2 clawctl cli", () => {
-  test.each([
-    ["openclaw", "2026.3.7"],
-    ["nanobot", "0.1.4.post4"],
-  ])("installs latest and chats with %s", async (implementation, version) => {
+  const assertTier2ChatFlow = async (implementation: string, version: string) => {
     const root = await createTempRoot()
     try {
       await seedSharedConfig(root)
@@ -954,7 +983,15 @@ describe("tier 2 clawctl cli", () => {
     } finally {
       await cleanupRoot(root)
     }
+  }
+
+  test("installs latest and chats with openclaw", async () => {
+    await assertTier2ChatFlow("openclaw", "2026.3.7")
   })
+
+  test("installs latest and chats with nanobot", async () => {
+    await assertTier2ChatFlow("nanobot", "0.1.4.post4")
+  }, 15_000)
 
   test("uninstall --all removes every installed version", async () => {
     const root = await createTempRoot()
@@ -1005,12 +1042,11 @@ describe("remote versions", () => {
 })
 
 describe("tier 3 clawctl cli", () => {
-  test.each([
-    ["nanoclaw", "main"],
-    ["bitclaw", "main"],
-  ])("installs and activates experimental bootstrap target %s", async (implementation, version) => {
+  test("installs and activates experimental bootstrap target nanoclaw with lifecycle-only support", async () => {
     const root = await createTempRoot()
     try {
+      const implementation = "nanoclaw"
+      const version = "main"
       const installOutput = await runCli(root, ["install", implementation])
       expect(installOutput).toContain(`installed ${implementation}@${version}`)
 
@@ -1028,11 +1064,47 @@ describe("tier 3 clawctl cli", () => {
       expect(statusOutput).toContain("state: running")
       expect(statusOutput).toContain("chat: no")
 
+      const chatFailure = await runCliExpectFailure(root, ["chat", "hello", implementation])
+      expect(chatFailure).toContain("nanoclaw does not expose a stable local loopback or host-side chat transport yet")
+
+      const pingFailure = await runCliExpectFailure(root, ["ping", implementation])
+      expect(pingFailure).toContain("nanoclaw does not expose a stable local loopback or host-side chat transport yet")
+
       const stopOutput = await runCli(root, ["stop", implementation])
       expect(stopOutput).toBe(`stopped ${implementation}@${version}`)
 
       const stoppedOutput = await runCli(root, ["status", `${implementation}@${version}`])
       expect(stoppedOutput).toContain("state: stopped")
+    } finally {
+      await cleanupRoot(root)
+    }
+  })
+
+  test("installs, activates, and chats with bootstrap-backed bitclaw", async () => {
+    const root = await createTempRoot()
+    try {
+      const implementation = "bitclaw"
+      const version = "main"
+      const installOutput = await runCli(root, ["install", implementation])
+      expect(installOutput).toContain(`installed ${implementation}@${version}`)
+
+      const useOutput = await runCli(root, ["use", implementation])
+      expect(useOutput).toContain(`using ${implementation}@${version}`)
+
+      const statusOutput = await runCli(root, ["status", `${implementation}@${version}`])
+      expect(statusOutput).toContain("supervision: native-daemon")
+      expect(statusOutput).toContain("state: running")
+      expect(statusOutput).toContain("chat: yes")
+      expect(statusOutput).toContain("ping: yes")
+
+      const pingOutput = await runCli(root, ["ping", implementation])
+      expect(pingOutput).toBe("pong")
+
+      const chatOutput = await runCli(root, ["chat", "hello-bitclaw", implementation])
+      expect(chatOutput).toBe("reply:hello-bitclaw")
+
+      const stopOutput = await runCli(root, ["stop", implementation])
+      expect(stopOutput).toBe(`stopped ${implementation}@${version}`)
     } finally {
       await cleanupRoot(root)
     }

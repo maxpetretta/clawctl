@@ -46,10 +46,9 @@ Registered with limits:
 
 - `nanoclaw`
   - bootstrap-backed native daemon supervision works for `install`, `use`, `status`, and `stop`
-  - `chat` and `ping` are not implemented
+  - `chat` and `ping` are not implemented because upstream does not expose a stable local loopback or host-side chat transport
 - `bitclaw`
-  - bootstrap-backed native daemon supervision works for `install`, `use`, `status`, and `stop`
-  - `chat` and `ping` are not implemented
+  - bootstrap-backed native daemon supervision works for `install`, `use`, `status`, `stop`, `chat`, and `ping`
 - `ironclaw`
   - release-backed install metadata works
   - not activatable through the current managed runtime flow
@@ -197,7 +196,8 @@ When helping with `clawctl`:
 - Use `clawctl doctor` before guessing why an install or runtime path is broken.
 - Treat `docker` as not implemented today.
 - Treat `ironclaw` and `piclaw` as limited.
-- Treat `nanoclaw` and `bitclaw` as startable but not messageable through `clawctl`.
+- Treat `nanoclaw` as startable but not messageable through `clawctl`.
+- Treat `bitclaw` as messageable through `clawctl`, but remember that it uses host-side IPC rather than a simple CLI chat command.
 - Do not claim Telegram transport is working through `clawctl` yet.
 - `stop` is real for the current managed local backend.
 

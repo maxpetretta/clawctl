@@ -34,10 +34,9 @@ Registered with limits:
 
 - `nanoclaw`
   - bootstrap-backed native daemon supervision works for `install`, `use`, `status`, and `stop`
-  - `chat` and `ping` are still not implemented
+  - `chat` and `ping` are not available because upstream does not expose a stable local loopback or host-side chat transport
 - `bitclaw`
-  - bootstrap-backed native daemon supervision works for `install`, `use`, `status`, and `stop`
-  - `chat` and `ping` are still not implemented
+  - bootstrap-backed native daemon supervision works for `install`, `use`, `status`, `stop`, `chat`, and `ping`
 - `ironclaw`
   - release-backed install metadata works
   - not activatable through the current managed runtime flow

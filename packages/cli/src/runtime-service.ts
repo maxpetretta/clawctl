@@ -109,6 +109,7 @@ function normalizeRuntimeRecord(record: RuntimeRecord, input: Partial<RuntimeRec
 
 type ResolvedRuntime = {
   readonly registration: RegisteredImplementation & {
+    messagingUnavailableReason?: string
     implementationHooks: {
       buildChatCommand: (input: {
         binaryPath: string
@@ -789,9 +790,10 @@ export const ClawctlRuntimeLive = Layer.effect(
       const record = yield* resolveChatTarget(target)
       const registration = yield* resolveRegistration(record.implementation)
       if (!registration.manifest.capabilities[capability]) {
+        const detail = registration.messagingUnavailableReason ? ` (${registration.messagingUnavailableReason})` : ""
         return yield* userError(
           "runtime.ensureActiveChatTarget",
-          `implementation does not support ${capability}: ${record.implementation}`,
+          `implementation does not support ${capability}: ${record.implementation}${detail}`,
         )
       }
       return yield* activateSelection({

@@ -173,9 +173,13 @@ describe("adapter registry", () => {
     expect(nanoclaw.implementationHooks.install).toBeDefined()
     expect(nanoclaw.implementationHooks.start).toBeDefined()
     expect(nanoclaw.implementationHooks.status).toBeDefined()
+    expect(nanoclaw.messagingUnavailableReason).toContain("stable local loopback")
     expect(bitclaw.implementationHooks.install).toBeDefined()
     expect(bitclaw.implementationHooks.start).toBeDefined()
     expect(bitclaw.implementationHooks.status).toBeDefined()
+    expect(bitclaw.implementationHooks.chat).toBeDefined()
+    expect(bitclaw.manifest.capabilities.chat).toBe(true)
+    expect(bitclaw.manifest.capabilities.ping).toBe(true)
     expect(ironclaw.manifest.backends[0]?.install[0]).toMatchObject({
       strategy: "github-release",
       repository: "nearai/ironclaw",

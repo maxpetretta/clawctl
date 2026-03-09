@@ -174,7 +174,7 @@ describe("runtime service", () => {
         }),
         makeRuntimeTestLayer(root),
       ),
-    ).rejects.toThrow("implementation does not support chat: nanoclaw")
+    ).rejects.toThrow("nanoclaw does not expose a stable local loopback or host-side chat transport yet")
   })
 
   test("activateSelection writes rendered config and current state", async () => {
