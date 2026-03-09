@@ -26,5 +26,8 @@
       "perplexity": { "enabled": false, "api_key": "", "max_results": 0 },
       "searxng": { "enabled": false, "base_url": "", "max_results": 0 }
     }
+  },
+  "channels": {
+    "telegram": {{PICOCLAW_TELEGRAM_BLOCK}}
   }
 }

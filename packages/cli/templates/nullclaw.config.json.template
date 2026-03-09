@@ -26,7 +26,7 @@
     "agent_timeout_secs": 30
   },
   "channels": {
-    "cli": true
+    "cli": true{{NULLCLAW_TELEGRAM_SUFFIX}}
   },
   "autonomy": {
     "level": "supervised",

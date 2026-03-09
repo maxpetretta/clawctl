@@ -7,6 +7,8 @@ export const defaultSharedConfig = {
   CLAW_MODEL: "moonshotai/kimi-k2.5",
   TELEGRAM_BOT_TOKEN: "",
   TELEGRAM_BOT_USERNAME: "",
+  TELEGRAM_CHAT_ID: "",
+  TELEGRAM_ALLOWED_FROM: "",
 } as const
 
 export type SharedConfigKey = keyof typeof defaultSharedConfig
@@ -20,6 +22,10 @@ export const sharedConfigSpec = Config.all({
   ),
   TELEGRAM_BOT_USERNAME: Config.string("TELEGRAM_BOT_USERNAME").pipe(
     Config.withDefault(defaultSharedConfig.TELEGRAM_BOT_USERNAME),
+  ),
+  TELEGRAM_CHAT_ID: Config.string("TELEGRAM_CHAT_ID").pipe(Config.withDefault(defaultSharedConfig.TELEGRAM_CHAT_ID)),
+  TELEGRAM_ALLOWED_FROM: Config.string("TELEGRAM_ALLOWED_FROM").pipe(
+    Config.withDefault(defaultSharedConfig.TELEGRAM_ALLOWED_FROM),
   ),
 })
 
@@ -67,6 +73,8 @@ export function sharedConfigToEntries(config: SharedConfig): SharedConfigEntries
     CLAW_MODEL: config.CLAW_MODEL,
     TELEGRAM_BOT_TOKEN: Redacted.value(config.TELEGRAM_BOT_TOKEN),
     TELEGRAM_BOT_USERNAME: config.TELEGRAM_BOT_USERNAME,
+    TELEGRAM_CHAT_ID: config.TELEGRAM_CHAT_ID,
+    TELEGRAM_ALLOWED_FROM: config.TELEGRAM_ALLOWED_FROM,
   }
 }
 

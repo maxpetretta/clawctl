@@ -16,6 +16,7 @@ import type { RegisteredImplementation } from "./types.ts"
 type ImplementationHook = {
   buildChatCommand: (input: {
     binaryPath: string
+    config: Record<string, string>
     installRoot: string
     homeDir: string
     message: string
@@ -26,6 +27,7 @@ type ImplementationHook = {
   }) => string[]
   chat?: (input: {
     binaryPath: string
+    config: Record<string, string>
     installRoot: string
     homeDir: string
     message: string
@@ -44,6 +46,7 @@ type ImplementationHook = {
   }>
   start?: (input: {
     binaryPath: string
+    config: Record<string, string>
     installRoot: string
     homeDir: string
     record: {
@@ -62,6 +65,7 @@ type ImplementationHook = {
   resolveVersions?: () => Promise<ReadonlyArray<string>>
   status?: (input: {
     binaryPath: string
+    config: Record<string, string>
     installRoot: string
     homeDir: string
     port?: number
@@ -81,6 +85,7 @@ type ImplementationHook = {
   >
   normalizeChatOutput?: (input: { stdout: string; stderr: string }) => string
   runtimeEnv: (input: {
+    config: Record<string, string>
     homeDir: string
     installRoot: string
     port?: number
@@ -111,7 +116,6 @@ const packageDir = resolve(currentDir, "../..")
 const templateDir = resolve(packageDir, "templates")
 
 const sharedKeys = ["CLAW_API_KEY", "CLAW_BASE_URL", "CLAW_MODEL"] as const satisfies readonly SharedConfigKey[]
-
 function makeCapabilities(overrides?: Partial<CapabilityManifest>): CapabilityManifest {
   return {
     chat: true,
@@ -155,6 +159,114 @@ function loadTemplate(templateName: string): Promise<string> {
 async function renderTemplate(templateName: string, replacements: Record<string, string>): Promise<string> {
   const template = await loadTemplate(templateName)
   return template.replaceAll(/\{\{([A-Z0-9_]+)\}\}/gu, (_match, key: string) => replacements[key] ?? "")
+}
+
+function parseSharedList(value: string | undefined): string[] {
+  if (!value) {
+    return []
+  }
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => (entry.startsWith("@") ? entry.slice(1) : entry))
+}
+
+function resolveTelegramSettings(config: Record<string, string>) {
+  const token = config.TELEGRAM_BOT_TOKEN?.trim() ?? ""
+  const username = config.TELEGRAM_BOT_USERNAME?.trim() ?? ""
+  const chatId = config.TELEGRAM_CHAT_ID?.trim() ?? ""
+  const allowedFrom = parseSharedList(config.TELEGRAM_ALLOWED_FROM)
+  const identities = allowedFrom.length > 0 ? allowedFrom : parseSharedList(chatId)
+  return {
+    enabled: token.length > 0,
+    token,
+    username: username.startsWith("@") ? username.slice(1) : username,
+    chatId: chatId.length > 0 ? chatId : (identities[0] ?? ""),
+    identities,
+  }
+}
+
+function nullclawTelegramSuffix(config: Record<string, string>): string {
+  const telegram = resolveTelegramSettings(config)
+  if (!telegram.enabled) {
+    return ""
+  }
+  return `,
+    "telegram": {
+      "accounts": {
+        "default": {
+          "bot_token": ${JSON.stringify(telegram.token)},
+          "allow_from": ${JSON.stringify(telegram.identities)}
+        }
+      }
+    }`
+}
+
+function picoclawTelegramBlock(config: Record<string, string>): string {
+  const telegram = resolveTelegramSettings(config)
+  if (!telegram.enabled) {
+    return `{
+      "enabled": false,
+      "token": "",
+      "allow_from": []
+    }`
+  }
+  return `{
+      "enabled": true,
+      "token": ${JSON.stringify(telegram.token)},
+      "allow_from": ${JSON.stringify(telegram.identities)}
+    }`
+}
+
+function zeroclawTelegramBlock(config: Record<string, string>): string {
+  const telegram = resolveTelegramSettings(config)
+  if (!telegram.enabled) {
+    return ""
+  }
+  return `
+
+[channels_config.telegram]
+bot_token = ${JSON.stringify(telegram.token)}
+allowed_users = ${JSON.stringify(telegram.identities)}
+interrupt_on_new_message = false
+`
+}
+
+function openclawTelegramChannelsBlock(config: Record<string, string>): string {
+  const telegram = resolveTelegramSettings(config)
+  if (!telegram.enabled) {
+    return ""
+  }
+  return `,
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "configWrites": false,
+      "dmPolicy": "pairing",
+      "botToken": ${JSON.stringify(telegram.token)},
+      "groupPolicy": "disabled",
+      "streaming": "partial"
+    }
+  }`
+}
+
+function openclawTelegramCredentialFiles(config: Record<string, string>) {
+  const telegram = resolveTelegramSettings(config)
+  if (!telegram.enabled || telegram.identities.length === 0) {
+    return [] as Array<{ path: string; content: string }>
+  }
+  const content = JSON.stringify({ version: 1, allowFrom: telegram.identities }, null, 2)
+  return [
+    {
+      path: ".openclaw/credentials/telegram-allowFrom.json",
+      content,
+    },
+    {
+      path: ".openclaw/credentials/telegram-default-allowFrom.json",
+      content,
+    },
+  ]
 }
 
 function sleep(ms: number): Promise<void> {
@@ -373,7 +485,9 @@ const nullclawRegistration = {
     description: "Release-backed local adapter with native daemon supervision",
     repository: "https://github.com/nullclaw/nullclaw",
     docsUrl: "https://github.com/nullclaw/nullclaw",
-    capabilities: makeCapabilities(),
+    capabilities: makeCapabilities({
+      telegram: true,
+    }),
     config: makeConfig([
       {
         path: ".nullclaw/config.json",
@@ -417,6 +531,7 @@ const nullclawRegistration = {
         path: ".nullclaw/config.json",
         content: await renderTemplate("nullclaw.config.json.template", {
           ...config,
+          NULLCLAW_TELEGRAM_SUFFIX: nullclawTelegramSuffix(config),
           WORKSPACE_DIR: workspaceDir,
         }),
       },
@@ -467,7 +582,9 @@ const picoclawRegistration = {
     description: "Release-backed local adapter with native daemon supervision",
     repository: "https://github.com/sipeed/picoclaw",
     docsUrl: "https://github.com/sipeed/picoclaw",
-    capabilities: makeCapabilities(),
+    capabilities: makeCapabilities({
+      telegram: true,
+    }),
     config: makeConfig([
       {
         path: ".picoclaw/config.json",
@@ -520,6 +637,7 @@ const picoclawRegistration = {
         path: ".picoclaw/config.json",
         content: await renderTemplate("picoclaw.config.json.template", {
           ...config,
+          PICOCLAW_TELEGRAM_BLOCK: picoclawTelegramBlock(config),
           WORKSPACE_DIR: workspaceDir,
         }),
       },
@@ -567,7 +685,9 @@ const zeroclawRegistration = {
     description: "Release-backed local adapter with native daemon supervision",
     repository: "https://github.com/zeroclaw-labs/zeroclaw",
     docsUrl: "https://github.com/zeroclaw-labs/zeroclaw",
-    capabilities: makeCapabilities(),
+    capabilities: makeCapabilities({
+      telegram: true,
+    }),
     config: makeConfig([
       {
         path: ".zeroclaw/config.toml",
@@ -611,6 +731,7 @@ const zeroclawRegistration = {
         path: ".zeroclaw/config.toml",
         content: await renderTemplate("zeroclaw.config.toml.template", {
           ...config,
+          ZEROCLAW_TELEGRAM_BLOCK: zeroclawTelegramBlock(config),
           WORKSPACE_DIR: workspaceDir,
         }),
       },
@@ -655,7 +776,9 @@ const openclawRegistration = {
     description: "Package-managed local adapter with native gateway supervision",
     repository: "https://github.com/openclaw/openclaw",
     docsUrl: "https://github.com/openclaw/openclaw",
-    capabilities: makeCapabilities(),
+    capabilities: makeCapabilities({
+      telegram: true,
+    }),
     config: makeConfig([
       {
         path: ".openclaw/openclaw.json",
@@ -738,9 +861,11 @@ const openclawRegistration = {
         path: ".openclaw/openclaw.json",
         content: await renderTemplate("openclaw.config.json.template", {
           ...config,
+          OPENCLAW_TELEGRAM_CHANNELS_BLOCK: openclawTelegramChannelsBlock(config),
           WORKSPACE_DIR: workspaceDir,
         }),
       },
+      ...openclawTelegramCredentialFiles(config),
     ],
     runtimeEnv: ({ homeDir, stateDir }) => ({
       HOME: homeDir,
@@ -966,14 +1091,22 @@ const nanoclawRegistration = {
     },
     resolveVersions: async () => ["main"],
     renderConfig: async () => [],
-    runtimeEnv: ({ homeDir, installRoot }) => ({
-      HOME: homeDir,
-      CLAWCTL_INSTALL_ROOT: installRoot,
-      NO_COLOR: "1",
-      CI: "1",
-    }),
-    start: ({ installRoot, homeDir, runtimeDir, stateDir, workspaceDir }) =>
-      Promise.resolve({
+    runtimeEnv: ({ config, homeDir, installRoot }) => {
+      const telegram = resolveTelegramSettings(config)
+      return {
+        HOME: homeDir,
+        CLAWCTL_INSTALL_ROOT: installRoot,
+        NO_COLOR: "1",
+        CI: "1",
+        ...(telegram.enabled ? { TELEGRAM_BOT_TOKEN: telegram.token } : {}),
+        ...(telegram.username ? { TELEGRAM_BOT_USERNAME: telegram.username } : {}),
+        ...(telegram.chatId ? { TELEGRAM_CHAT_ID: telegram.chatId } : {}),
+        ...(telegram.identities.length > 0 ? { TELEGRAM_ALLOWED_FROM: telegram.identities.join(",") } : {}),
+      }
+    },
+    start: ({ config, installRoot, homeDir, runtimeDir, stateDir, workspaceDir }) => {
+      const telegram = resolveTelegramSettings(config)
+      return Promise.resolve({
         command: "node",
         args: [resolve(installRoot, "repo", "dist", "index.js")],
         env: {
@@ -984,8 +1117,13 @@ const nanoclawRegistration = {
           CLAWCTL_WORKSPACE_DIR: workspaceDir,
           NO_COLOR: "1",
           CI: "1",
+          ...(telegram.enabled ? { TELEGRAM_BOT_TOKEN: telegram.token } : {}),
+          ...(telegram.username ? { TELEGRAM_BOT_USERNAME: telegram.username } : {}),
+          ...(telegram.chatId ? { TELEGRAM_CHAT_ID: telegram.chatId } : {}),
+          ...(telegram.identities.length > 0 ? { TELEGRAM_ALLOWED_FROM: telegram.identities.join(",") } : {}),
         },
-      }),
+      })
+    },
     status: ({ installRoot }) => {
       return Promise.resolve(existsSync(resolve(installRoot, "repo", "data", "ipc")))
     },
@@ -1083,14 +1221,19 @@ setInterval(() => {}, 1000);
       writeBitclawInboundMessage(homeDir, message)
       return readBitclawResponse(homeDir)
     },
-    runtimeEnv: ({ homeDir, installRoot }) => ({
-      HOME: homeDir,
-      BITCLAW_HOME: homeDir,
-      CLAWCTL_INSTALL_ROOT: installRoot,
-      NO_COLOR: "1",
-      CI: "1",
-    }),
-    start: ({ installRoot, homeDir, runtimeDir, stateDir, workspaceDir }) =>
+    runtimeEnv: ({ config, homeDir, installRoot }) => {
+      const telegram = resolveTelegramSettings(config)
+      return {
+        HOME: homeDir,
+        BITCLAW_HOME: homeDir,
+        CLAWCTL_INSTALL_ROOT: installRoot,
+        NO_COLOR: "1",
+        CI: "1",
+        ...(telegram.enabled ? { TELEGRAM_BOT_TOKEN: telegram.token } : {}),
+        ...(telegram.chatId ? { TELEGRAM_CHAT_ID: telegram.chatId } : {}),
+      }
+    },
+    start: ({ config, installRoot, homeDir, runtimeDir, stateDir, workspaceDir }) =>
       Promise.resolve({
         command: "node",
         args: [
@@ -1106,6 +1249,12 @@ setInterval(() => {}, 1000);
           CLAWCTL_WORKSPACE_DIR: workspaceDir,
           NO_COLOR: "1",
           CI: "1",
+          ...(resolveTelegramSettings(config).enabled
+            ? { TELEGRAM_BOT_TOKEN: resolveTelegramSettings(config).token }
+            : {}),
+          ...(resolveTelegramSettings(config).chatId
+            ? { TELEGRAM_CHAT_ID: resolveTelegramSettings(config).chatId }
+            : {}),
         },
       }),
     status: ({ homeDir }) => {

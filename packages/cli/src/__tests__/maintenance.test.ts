@@ -50,8 +50,11 @@ afterEach(async () => {
   process.env.CLAWCTL_NPM_BIN = undefined
   process.env.CLAWCTL_DOCKER_BIN = undefined
   process.env.CLAWCTL_BUN_BIN = undefined
+  process.env.PATH = originalPath
   await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
+
+const originalPath = process.env.PATH ?? ""
 
 describe("maintenance service", () => {
   test("exposes pure install and config helper behavior", () => {
@@ -121,6 +124,8 @@ describe("maintenance service", () => {
           CLAW_MODEL: "ok",
           TELEGRAM_BOT_TOKEN: Redacted.make(""),
           TELEGRAM_BOT_USERNAME: "",
+          TELEGRAM_CHAT_ID: "",
+          TELEGRAM_ALLOWED_FROM: "",
         },
         ["CLAW_API_KEY", "CLAW_MODEL", "TELEGRAM_BOT_TOKEN"],
       ),
@@ -136,6 +141,7 @@ describe("maintenance service", () => {
     await writeExecutable(npmPath)
     await writeExecutable(openclawPath)
     process.env.CLAWCTL_NPM_BIN = npmPath
+    process.env.PATH = `${join(root, "bin")}:${originalPath}`
 
     const report = await runWithLayer(
       Effect.gen(function* () {
@@ -161,9 +167,11 @@ describe("maintenance service", () => {
   test("doctor uses current selection and handles entrypoint-free installs", async () => {
     const root = await createRoot()
     process.env.CLAWCTL_GIT_BIN = "/usr/bin/git"
+    process.env.PATH = `${join(root, "bin")}:${originalPath}`
 
     const report = await runWithLayer(
       Effect.gen(function* () {
+        const paths = yield* ClawctlPathsService
         const store = yield* ClawctlStoreService
         const maintenance = yield* ClawctlMaintenanceService
         yield* store.writeInstallRecord(
@@ -180,12 +188,22 @@ describe("maintenance service", () => {
           version: "main",
           backend: "local",
         })
+        yield* Effect.tryPromise({
+          try: async () => {
+            await mkdir(paths.paths.binDir, { recursive: true })
+            await writeExecutable(paths.activeShim())
+            await writeExecutable(paths.implementationShim("nanoclaw"))
+          },
+          catch: (cause) => userError("maintenance.test", String(cause)),
+        })
         return yield* maintenance.runDoctor()
       }),
       makeMaintenanceLayer(root),
     )
 
     expect(report.ok).toBe(true)
+    expect(report.checks.some((check) => check.label === "path:bin" && check.ok)).toBe(true)
+    expect(report.checks.some((check) => check.label === "shim:claw" && check.ok)).toBe(true)
     expect(
       report.checks.some(
         (check) => check.label === "nanoclaw:entrypoint:main" && check.detail === "no direct local entrypoint declared",
@@ -252,7 +270,14 @@ describe("maintenance service", () => {
       makeMaintenanceLayer(root),
     )
 
-    expect(report.ok).toBe(true)
-    expect(report.checks).toEqual([{ label: "registry", ok: true, detail: "adapter registry is valid" }])
+    expect(report.ok).toBe(false)
+    expect(report.checks).toEqual([
+      { label: "registry", ok: true, detail: "adapter registry is valid" },
+      {
+        label: "path:bin",
+        ok: false,
+        detail: `add ${join(root, "bin")} to PATH to use active claw shims`,
+      },
+    ])
   })
 })

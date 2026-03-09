@@ -97,6 +97,14 @@ Current shared keys:
 - `CLAW_MODEL`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_BOT_USERNAME`
+- `TELEGRAM_CHAT_ID`
+- `TELEGRAM_ALLOWED_FROM`
+
+To make the active claw CLI resolve on your shell, add:
+
+```bash
+export PATH="$HOME/.clawctl/bin:$PATH"
+```
 
 ### 3. Install A Claw
 
@@ -139,7 +147,10 @@ Show the current active selection:
 clawctl current
 ```
 
-`use` stops the previous managed runtime, renders isolated config for the new target, starts the new managed runtime in the background, and then updates `current.json`.
+`use` stops the previous managed runtime, renders isolated config for the new target, starts the new managed runtime in the background, updates `current.json`, and rewrites the active shims:
+
+- `~/.clawctl/bin/claw`
+- `~/.clawctl/bin/<active-implementation>`
 
 ### 5. Talk To The Active Claw
 

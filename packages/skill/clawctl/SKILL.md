@@ -32,7 +32,7 @@ Current implementation limits:
 - host platform: `darwin-arm64`
 - backend: `local` only
 - `docker` is parsed in the CLI but not implemented
-- Telegram keys exist in shared config but are not wired into live adapters yet
+- the active claw shim directory must be on `PATH` if the user expects native command resolution
 - `ironclaw` is still install-only
 
 ## Claws Available
@@ -70,6 +70,8 @@ Practical rule:
 - `CLAW_MODEL`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_BOT_USERNAME`
+- `TELEGRAM_CHAT_ID`
+- `TELEGRAM_ALLOWED_FROM`
 
 Current local adapters mainly require:
 
@@ -91,6 +93,7 @@ Important behavior:
 - shared credentials live in `~/.clawctl/config/shared.env`
 - each runtime still gets isolated `HOME`, config files, state, and workspace
 - `clawctl` installs do not intentionally reuse the user’s normal claw runtime state
+- `use` rewrites `~/.clawctl/bin/claw` and `~/.clawctl/bin/<active-implementation>` for the selected claw
 
 ## Common Patterns
 
@@ -199,6 +202,7 @@ When helping with `clawctl`:
 - Treat `nanoclaw` as startable but not messageable through `clawctl`.
 - Treat `bitclaw` as messageable through `clawctl`, but remember that it uses host-side IPC rather than a simple CLI chat command.
 - Do not claim Telegram transport is working through `clawctl` yet.
+- Do say that shared Telegram config is rendered or exported into adapters that support it.
 - `stop` is real for the current managed local backend.
 
 If the task is about implementation details or behavior, inspect the live CLI package:

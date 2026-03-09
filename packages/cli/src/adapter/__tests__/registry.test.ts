@@ -12,6 +12,7 @@ const config = {
 
 describe("adapter registry", () => {
   const runtimeInput = {
+    config,
     homeDir: "/tmp/home",
     installRoot: "/tmp/install",
     runtimeDir: "/tmp/runtime",

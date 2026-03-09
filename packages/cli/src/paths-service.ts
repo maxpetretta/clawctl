@@ -7,6 +7,7 @@ export type ClawctlPaths = {
   readonly rootDir: string
   readonly configDir: string
   readonly cacheDir: string
+  readonly binDir: string
   readonly installDir: string
   readonly runtimeDir: string
   readonly logDir: string
@@ -21,6 +22,8 @@ type ClawctlPathsApi = {
   readonly installParentDir: (implementation: string, backend?: string) => string
   readonly partialInstallRoot: (implementation: string, version: string, token: string, backend?: string) => string
   readonly installMetadataFile: (implementation: string, version: string, backend?: string) => string
+  readonly activeShim: () => string
+  readonly implementationShim: (implementation: string) => string
   readonly runtimeRoot: (implementation: string, version: string, backend?: string) => string
   readonly runtimeImplementationDir: (implementation: string, backend?: string) => string
   readonly runtimeHomeDir: (implementation: string, version: string, backend?: string) => string
@@ -40,6 +43,7 @@ function makeClawctlPathsApi(path: PlatformPath.Path, rootDir: string): ClawctlP
     rootDir,
     configDir: path.resolve(rootDir, "config"),
     cacheDir: path.resolve(rootDir, "cache"),
+    binDir: path.resolve(rootDir, "bin"),
     installDir: path.resolve(rootDir, "installs"),
     runtimeDir: path.resolve(rootDir, "runtimes"),
     logDir: path.resolve(rootDir, "logs"),
@@ -55,6 +59,8 @@ function makeClawctlPathsApi(path: PlatformPath.Path, rootDir: string): ClawctlP
     path.resolve(installParentDir(implementation, backend), `${version}.partial-${token}`)
   const installMetadataFile = (implementation: string, version: string, backend = "local") =>
     path.resolve(installRoot(implementation, version, backend), "install.json")
+  const activeShim = () => path.resolve(paths.binDir, "claw")
+  const implementationShim = (implementation: string) => path.resolve(paths.binDir, implementation)
   const runtimeImplementationDir = (implementation: string, backend = "local") =>
     path.resolve(paths.runtimeDir, backend, implementation)
   const runtimeRoot = (implementation: string, version: string, backend = "local") =>
@@ -77,6 +83,8 @@ function makeClawctlPathsApi(path: PlatformPath.Path, rootDir: string): ClawctlP
     installParentDir,
     partialInstallRoot,
     installMetadataFile,
+    activeShim,
+    implementationShim,
     runtimeRoot,
     runtimeImplementationDir,
     runtimeHomeDir,

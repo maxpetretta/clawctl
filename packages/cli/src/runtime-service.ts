@@ -107,12 +107,17 @@ function normalizeRuntimeRecord(record: RuntimeRecord, input: Partial<RuntimeRec
   }
 }
 
+function shellQuote(argument: string): string {
+  return `'${argument.replaceAll("'", `'\\''`)}'`
+}
+
 type ResolvedRuntime = {
   readonly registration: RegisteredImplementation & {
     messagingUnavailableReason?: string
     implementationHooks: {
       buildChatCommand: (input: {
         binaryPath: string
+        config: Record<string, string>
         installRoot: string
         homeDir: string
         message: string
@@ -123,6 +128,7 @@ type ResolvedRuntime = {
       }) => string[]
       chat?: (input: {
         binaryPath: string
+        config: Record<string, string>
         installRoot: string
         homeDir: string
         message: string
@@ -139,6 +145,7 @@ type ResolvedRuntime = {
         }>
       >
       runtimeEnv: (input: {
+        config: Record<string, string>
         homeDir: string
         installRoot: string
         port?: number
@@ -148,6 +155,7 @@ type ResolvedRuntime = {
       }) => NodeJS.ProcessEnv
       start?: (input: {
         binaryPath: string
+        config: Record<string, string>
         installRoot: string
         homeDir: string
         record: {
@@ -165,6 +173,7 @@ type ResolvedRuntime = {
       }>
       status?: (input: {
         binaryPath: string
+        config: Record<string, string>
         installRoot: string
         homeDir: string
         port?: number
@@ -186,8 +195,17 @@ export const ClawctlRuntimeLive = Layer.effect(
   Effect.gen(function* () {
     const commandExecutor = yield* CommandExecutor.CommandExecutor
     const fs = yield* FileSystem.FileSystem
-    const { path, paths, runtimeHomeDir, runtimeLogFile, runtimeRoot, runtimeStateDir, runtimeWorkspaceDir } =
-      yield* ClawctlPathsService
+    const {
+      activeShim,
+      implementationShim,
+      path,
+      paths,
+      runtimeHomeDir,
+      runtimeLogFile,
+      runtimeRoot,
+      runtimeStateDir,
+      runtimeWorkspaceDir,
+    } = yield* ClawctlPathsService
     const store = yield* ClawctlStoreService
     const resolveRegistration = Effect.fn("ClawctlRuntimeService.resolveRegistration")(function* (
       implementation: string,
@@ -219,6 +237,54 @@ export const ClawctlRuntimeLive = Layer.effect(
         runtime,
       } satisfies ResolvedRuntime
     })
+    const resolveSharedConfigEntries = Effect.fn("ClawctlRuntimeService.resolveSharedConfigEntries")(function* () {
+      return sharedConfigToEntries(yield* store.readSharedConfig)
+    })
+    const clearShimAt = Effect.fn("ClawctlRuntimeService.clearShimAt")(function* (shimPath: string) {
+      const exists = yield* withSystemError("runtime.shimExists", fs.exists(shimPath))
+      if (!exists) {
+        return
+      }
+      yield* withSystemError("runtime.removeShim", fs.remove(shimPath))
+    })
+    const clearActiveShims = Effect.fn("ClawctlRuntimeService.clearActiveShims")(function* (implementation?: string) {
+      yield* clearShimAt(activeShim())
+      if (implementation) {
+        yield* clearShimAt(implementationShim(implementation))
+      }
+    })
+    const updateActiveShims = Effect.fn("ClawctlRuntimeService.updateActiveShims")(function* (
+      record: InstallRecord,
+      previousImplementation?: string,
+    ) {
+      const [command, ...fixedArgs] = record.entrypointCommand
+      if (!command) {
+        return yield* userError("runtime.updateActiveShims", `missing binary for ${record.implementation}`)
+      }
+
+      const wrapper = `#!/bin/sh
+exec ${[command, ...fixedArgs].map(shellQuote).join(" ")} "$@"
+`
+
+      yield* withSystemError("runtime.makeBinDir", fs.makeDirectory(paths.binDir, { recursive: true }))
+      yield* clearActiveShims(previousImplementation)
+      if (previousImplementation && previousImplementation !== record.implementation) {
+        yield* clearShimAt(implementationShim(record.implementation))
+      }
+      yield* withSystemError("runtime.writeActiveShim", fs.writeFileString(activeShim(), wrapper))
+      yield* withSystemError(
+        "runtime.writeImplementationShim",
+        fs.writeFileString(implementationShim(record.implementation), wrapper),
+      )
+      yield* withSystemError(
+        "runtime.chmodActiveShim",
+        commandExecutor.exitCode(Command.make("chmod", "755", activeShim(), implementationShim(record.implementation))),
+      ).pipe(
+        Effect.flatMap((exitCode) =>
+          Number(exitCode) === 0 ? Effect.void : userError("runtime.updateActiveShims", "failed to chmod shim"),
+        ),
+      )
+    })
 
     const buildRuntimeRecord = Effect.fn("ClawctlRuntimeService.buildRuntimeRecord")(function* (
       record: InstallRecord,
@@ -248,6 +314,9 @@ export const ClawctlRuntimeLive = Layer.effect(
 
     const renderRuntimeConfig = Effect.fn("ClawctlRuntimeService.renderRuntimeConfig")(function* (
       record: InstallRecord,
+      options?: {
+        validateRequiredKeys?: boolean
+      },
     ) {
       const config = yield* store.readSharedConfig
       const configEntries = sharedConfigToEntries(config)
@@ -261,13 +330,15 @@ export const ClawctlRuntimeLive = Layer.effect(
       yield* withSystemError("runtime.makeWorkspaceDir", fs.makeDirectory(workspaceDir, { recursive: true }))
       yield* withSystemError("runtime.makeStateDir", fs.makeDirectory(stateDir, { recursive: true }))
 
-      for (const file of registration.manifest.config.files) {
-        const missingKeys = missingSharedConfigKeys(config, file.requiredKeys)
-        if (missingKeys.length > 0) {
-          return yield* userError(
-            "runtime.renderRuntimeConfig",
-            `shared config key is missing or placeholder: ${missingKeys[0]}`,
-          )
+      if (options?.validateRequiredKeys === true) {
+        for (const file of registration.manifest.config.files) {
+          const missingKeys = missingSharedConfigKeys(config, file.requiredKeys)
+          if (missingKeys.length > 0) {
+            return yield* userError(
+              "runtime.renderRuntimeConfig",
+              `shared config key is missing or placeholder: ${missingKeys[0]}`,
+            )
+          }
         }
       }
 
@@ -311,10 +382,12 @@ export const ClawctlRuntimeLive = Layer.effect(
       const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion)
       const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion)
       const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion)
+      const configEntries = yield* resolveSharedConfigEntries()
       return yield* Effect.tryPromise({
         try: () =>
           registration.implementationHooks.status?.({
             binaryPath: record.entrypointCommand[0] ?? "",
+            config: configEntries,
             installRoot: record.installRoot,
             homeDir,
             record: {
@@ -440,9 +513,10 @@ export const ClawctlRuntimeLive = Layer.effect(
       runtimeRecord?: RuntimeRecord,
     ) {
       yield* store.ensureSharedConfig
-      yield* renderRuntimeConfig(record)
+      yield* renderRuntimeConfig(record, { validateRequiredKeys: true })
 
       const { registration } = yield* resolveRuntime(record)
+      const configEntries = yield* resolveSharedConfigEntries()
       const homeDir = runtimeHomeDir(record.implementation, record.resolvedVersion)
       const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion)
       const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion)
@@ -452,6 +526,7 @@ export const ClawctlRuntimeLive = Layer.effect(
           try: () =>
             registration.implementationHooks.chat?.({
               binaryPath: record.entrypointCommand[0] ?? "",
+              config: configEntries,
               installRoot: record.installRoot,
               homeDir,
               message,
@@ -467,6 +542,7 @@ export const ClawctlRuntimeLive = Layer.effect(
         try: () =>
           registration.implementationHooks.buildChatCommand({
             binaryPath: record.entrypointCommand[0] ?? "",
+            config: configEntries,
             installRoot: record.installRoot,
             homeDir,
             message,
@@ -493,6 +569,7 @@ export const ClawctlRuntimeLive = Layer.effect(
         ...(yield* Effect.try({
           try: () =>
             registration.implementationHooks.runtimeEnv({
+              config: configEntries,
               homeDir,
               installRoot: record.installRoot,
               runtimeDir,
@@ -551,10 +628,12 @@ export const ClawctlRuntimeLive = Layer.effect(
       const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion)
       const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion)
       const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion)
+      const configEntries = yield* resolveSharedConfigEntries()
       const start = yield* Effect.tryPromise({
         try: () =>
           registration.implementationHooks.start?.({
             binaryPath: record.entrypointCommand[0] ?? "",
+            config: configEntries,
             installRoot: record.installRoot,
             homeDir,
             record: {
@@ -756,6 +835,7 @@ export const ClawctlRuntimeLive = Layer.effect(
     const activateSelection = Effect.fn("ClawctlRuntimeService.activateSelection")(function* (target: TargetReference) {
       const record = yield* store.resolveInstalledRecord(target.implementation, target.version)
       const current = yield* store.readCurrentSelection
+      const previousImplementation = current?.implementation
       if (
         current &&
         (current.implementation !== record.implementation ||
@@ -771,6 +851,14 @@ export const ClawctlRuntimeLive = Layer.effect(
       }
 
       yield* spawnManagedRuntime(record)
+      yield* updateActiveShims(record, previousImplementation).pipe(
+        Effect.catchAll((error) =>
+          stopInstalledRecord(record).pipe(
+            Effect.catchAll(() => Effect.void),
+            Effect.zipRight(Effect.fail(error)),
+          ),
+        ),
+      )
       yield* store.writeCurrentSelection({
         implementation: record.implementation,
         version: record.resolvedVersion,
@@ -847,20 +935,31 @@ export const ClawctlRuntimeLive = Layer.effect(
     const stopSelection = Effect.fn("ClawctlRuntimeService.stopSelection")(function* (target: Option.Option<string>) {
       const resolvedTarget = target._tag === "Some" ? target.value : undefined
       let record: InstallRecord | undefined
+      const current = yield* store.readCurrentSelection
       if (resolvedTarget) {
         const parsed = yield* parseReference(resolvedTarget)
         record = yield* store.resolveInstalledRecord(parsed.implementation, parsed.version)
       } else {
-        const current = yield* store.readCurrentSelection
         if (!current) {
           return { stopped: false } satisfies StopSelectionResult
         }
         record = yield* store.resolveInstalledRecord(current.implementation, current.version)
       }
 
+      const stopped = yield* stopInstalledRecord(record)
+      if (
+        current &&
+        current.implementation === record.implementation &&
+        current.version === record.resolvedVersion &&
+        current.backend === record.backend
+      ) {
+        yield* store.clearCurrentSelection
+        yield* clearActiveShims(record.implementation)
+      }
+
       return {
         record,
-        stopped: yield* stopInstalledRecord(record),
+        stopped,
       } satisfies StopSelectionResult
     })
 

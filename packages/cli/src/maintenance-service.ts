@@ -150,9 +150,29 @@ export const ClawctlMaintenanceLive = Layer.effect(
     const runDoctor = Effect.fn("ClawctlMaintenanceService.runDoctor")(function* (target?: string) {
       const config = yield* store.readSharedConfig
       const host = currentHostPlatform()
-      const checks: DoctorCheck[] = [{ label: "registry", ok: true, detail: "adapter registry is valid" }]
+      const pathEntries = (process.env.PATH ?? "").split(":").filter((entry) => entry.length > 0)
+      const checks: DoctorCheck[] = [
+        { label: "registry", ok: true, detail: "adapter registry is valid" },
+        {
+          label: "path:bin",
+          ok: pathEntries.includes(paths.binDir),
+          detail: pathEntries.includes(paths.binDir)
+            ? `${paths.binDir} is on PATH`
+            : `add ${paths.binDir} to PATH to use active claw shims`,
+        },
+      ]
       const targets = yield* selectDoctorTargets(target)
       const installedRecords = yield* store.listInstallRecords
+      const currentSelection = yield* store.readCurrentSelection
+
+      if (currentSelection) {
+        const activeShim = path.resolve(paths.binDir, "claw")
+        checks.push({
+          label: "shim:claw",
+          ok: yield* commandExists(activeShim),
+          detail: activeShim,
+        })
+      }
 
       for (const implementationId of targets) {
         const registration = yield* resolveRegistration(implementationId)
@@ -195,6 +215,15 @@ export const ClawctlMaintenanceLive = Layer.effect(
             label: `${implementationId}:shared-config`,
             ok: missingKeys.length === 0,
             detail: missingKeys.length === 0 ? "required shared keys present" : `missing ${missingKeys.join(", ")}`,
+          })
+        }
+
+        if (currentSelection?.implementation === implementationId) {
+          const implementationShim = path.resolve(paths.binDir, implementationId)
+          checks.push({
+            label: `${implementationId}:shim`,
+            ok: yield* commandExists(implementationShim),
+            detail: implementationShim,
           })
         }
 

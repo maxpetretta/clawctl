@@ -97,7 +97,7 @@ function installRecord(root: string): InstallRecord {
     backend: "local",
     installStrategy: "npm-package",
     installRoot: join(root, "installs", "local", "openclaw", "2026.3.7"),
-    entrypointCommand: [join(root, "bin", "openclaw")],
+    entrypointCommand: [join(root, "tools", "openclaw")],
     platform: { os: "darwin", arch: "arm64" },
     sourceReference: "openclaw",
     verificationSummary: "registry-managed",
@@ -196,13 +196,32 @@ describe("runtime service", () => {
         const runtimeState = yield* runtime.runtimeState(record)
         const current = yield* store.readCurrentSelection
         const configFile = join(paths.runtimeRoot("openclaw", "2026.3.7"), "home", ".openclaw", "openclaw.json")
+        const allowFromFile = join(
+          paths.runtimeRoot("openclaw", "2026.3.7"),
+          "home",
+          ".openclaw",
+          "credentials",
+          "telegram-allowFrom.json",
+        )
         return {
+          activeShimExists: yield* Effect.tryPromise({
+            try: () => Bun.file(paths.activeShim()).exists(),
+            catch: (cause) => userError("runtime.test", String(cause)),
+          }),
           activatedRecord,
+          allowFromText: yield* Effect.tryPromise({
+            try: async () => ((await Bun.file(allowFromFile).exists()) ? Bun.file(allowFromFile).text() : ""),
+            catch: (cause) => userError("runtime.test", String(cause)),
+          }),
           configText: yield* Effect.tryPromise({
             try: () => Bun.file(configFile).text(),
             catch: (cause) => userError("runtime.test", String(cause)),
           }),
           current,
+          implementationShimExists: yield* Effect.tryPromise({
+            try: () => Bun.file(paths.implementationShim("openclaw")).exists(),
+            catch: (cause) => userError("runtime.test", String(cause)),
+          }),
           runtimeState,
         }
       }),
@@ -216,8 +235,75 @@ describe("runtime service", () => {
       backend: "local",
     })
     expect(activated.configText).toContain("openai-completions")
+    expect(activated.configText).not.toContain('"channels"')
+    expect(activated.activeShimExists).toBe(true)
+    expect(activated.implementationShimExists).toBe(true)
+    expect(activated.allowFromText).toBe("")
     expect(activated.runtimeState.state).toBe("running")
     expect(activated.runtimeState.port).toBe(28789)
+  })
+
+  test("activateSelection renders telegram config and credential files when shared values are present", async () => {
+    const root = await createRoot()
+    const record = installRecord(root)
+    await writeOpenclawExecutable(record.entrypointCommand[0] ?? join(root, "bin", "openclaw"))
+
+    const rendered = await runWithLayer(
+      Effect.gen(function* () {
+        const paths = yield* ClawctlPathsService
+        const store = yield* ClawctlStoreService
+        const runtime = yield* ClawctlRuntimeService
+        yield* store.writeInstallRecord(record)
+        yield* store.setSharedConfigValue("CLAW_API_KEY", "secret")
+        yield* store.setSharedConfigValue("TELEGRAM_BOT_TOKEN", "telegram-token")
+        yield* store.setSharedConfigValue("TELEGRAM_ALLOWED_FROM", "12345,67890")
+        yield* runtime.activateSelection({
+          implementation: "openclaw",
+          version: "2026.3.7",
+        })
+        const runtimeBase = paths.runtimeRoot("openclaw", "2026.3.7")
+        return {
+          allowFromText: yield* Effect.tryPromise({
+            try: () =>
+              Bun.file(join(runtimeBase, "home", ".openclaw", "credentials", "telegram-allowFrom.json")).text(),
+            catch: (cause) => userError("runtime.test", String(cause)),
+          }),
+          configText: yield* Effect.tryPromise({
+            try: () => Bun.file(join(runtimeBase, "home", ".openclaw", "openclaw.json")).text(),
+            catch: (cause) => userError("runtime.test", String(cause)),
+          }),
+        }
+      }),
+      makeRuntimeTestLayer(root),
+    )
+
+    expect(rendered.configText).toContain('"channels"')
+    expect(rendered.configText).toContain('"botToken": "telegram-token"')
+    expect(rendered.allowFromText).toContain('"allowFrom"')
+    expect(rendered.allowFromText).toContain('"12345"')
+    expect(rendered.allowFromText).toContain('"67890"')
+  })
+
+  test("activateSelection can start a daemon before shared credentials are configured", async () => {
+    const root = await createRoot()
+    const record = installRecord(root)
+    await writeOpenclawExecutable(record.entrypointCommand[0] ?? join(root, "bin", "openclaw"))
+
+    const runtimeState = await runWithLayer(
+      Effect.gen(function* () {
+        const store = yield* ClawctlStoreService
+        const runtime = yield* ClawctlRuntimeService
+        yield* store.writeInstallRecord(record)
+        yield* runtime.activateSelection({
+          implementation: "openclaw",
+          version: "2026.3.7",
+        })
+        return yield* runtime.runtimeState(record)
+      }),
+      makeRuntimeTestLayer(root),
+    )
+
+    expect(runtimeState.state).toBe("running")
   })
 
   test("runChatDirect renders config and normalizes output", async () => {
@@ -276,6 +362,7 @@ describe("runtime service", () => {
 
     const snapshot = await runWithLayer(
       Effect.gen(function* () {
+        const paths = yield* ClawctlPathsService
         const store = yield* ClawctlStoreService
         const runtime = yield* ClawctlRuntimeService
         yield* store.writeInstallRecord(record)
@@ -285,12 +372,26 @@ describe("runtime service", () => {
           version: "2026.3.7",
         })
         yield* runtime.stopSelection(Option.some("openclaw@2026.3.7"))
-        return yield* runtime.runtimeState(record)
+        return {
+          activeShimExists: yield* Effect.tryPromise({
+            try: () => Bun.file(paths.activeShim()).exists(),
+            catch: (cause) => userError("runtime.test", String(cause)),
+          }),
+          current: yield* store.readCurrentSelection,
+          implementationShimExists: yield* Effect.tryPromise({
+            try: () => Bun.file(paths.implementationShim("openclaw")).exists(),
+            catch: (cause) => userError("runtime.test", String(cause)),
+          }),
+          runtimeState: yield* runtime.runtimeState(record),
+        }
       }),
       makeRuntimeTestLayer(root),
     )
 
-    expect(snapshot.state).toBe("stopped")
+    expect(snapshot.runtimeState.state).toBe("stopped")
+    expect(snapshot.current).toBeUndefined()
+    expect(snapshot.activeShimExists).toBe(false)
+    expect(snapshot.implementationShimExists).toBe(false)
   })
 
   test("exposes the managed ping prompt", async () => {

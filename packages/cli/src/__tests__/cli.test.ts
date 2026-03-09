@@ -647,6 +647,13 @@ async function seedSharedConfig(root: string): Promise<void> {
   await runCli(root, ["config", "set", "CLAW_MODEL", "test-model"])
 }
 
+async function seedTelegramConfig(root: string): Promise<void> {
+  await runCli(root, ["config", "set", "TELEGRAM_BOT_TOKEN", "telegram-token"])
+  await runCli(root, ["config", "set", "TELEGRAM_BOT_USERNAME", "clawctl_bot"])
+  await runCli(root, ["config", "set", "TELEGRAM_CHAT_ID", "12345"])
+  await runCli(root, ["config", "set", "TELEGRAM_ALLOWED_FROM", "12345,67890"])
+}
+
 beforeAll(async () => {
   supportRoot = await mkdtemp(join(tmpdir(), "clawctl-support-"))
   await createGithubFixtures()
@@ -834,9 +841,10 @@ describe("tier 1 clawctl cli", () => {
   test("doctor validates the adapter registry", async () => {
     const root = await createTempRoot()
     try {
-      const output = await runCli(root, ["doctor"])
+      const output = await runCliExpectFailure(root, ["doctor"])
       expect(output).toContain("ok: registry: adapter registry is valid")
-      expect(output).toContain("doctor: ok")
+      expect(output).toContain(`error: path:bin: add ${join(root, "bin")} to PATH to use active claw shims`)
+      expect(output).toContain("doctor: failed")
     } finally {
       await cleanupRoot(root)
     }
@@ -869,6 +877,48 @@ describe("tier 1 clawctl cli", () => {
       const statusOutput = await runCli(root, ["status"])
       expect(statusOutput).toContain("supervision: native-daemon")
       expect(statusOutput).toContain("state: running")
+    } finally {
+      await cleanupRoot(root)
+    }
+  })
+
+  test("use can start nullclaw before shared credentials are configured", async () => {
+    const root = await createTempRoot()
+    try {
+      const installOutput = await runCli(root, ["install", "nullclaw@v2026.3.7"])
+      expect(installOutput).toContain("installed nullclaw@v2026.3.7")
+
+      const useOutput = await runCli(root, ["use", "nullclaw@v2026.3.7"])
+      expect(useOutput).toContain("using nullclaw@v2026.3.7")
+
+      const statusOutput = await runCli(root, ["status"])
+      expect(statusOutput).toContain("state: running")
+    } finally {
+      await cleanupRoot(root)
+    }
+  })
+
+  test("use writes active shims and passes telegram config into the active claw", async () => {
+    const root = await createTempRoot()
+    try {
+      await seedSharedConfig(root)
+      await seedTelegramConfig(root)
+      await runCli(root, ["install", "nullclaw@v2026.3.7"])
+
+      const useOutput = await runCli(root, ["use", "nullclaw@v2026.3.7"])
+      expect(useOutput).toContain("using nullclaw@v2026.3.7")
+
+      const activeShim = join(root, "bin", "claw")
+      const implementationShim = join(root, "bin", "nullclaw")
+      const configText = await Bun.file(
+        join(root, "runtimes", "local", "nullclaw", "v2026.3.7", "home", ".nullclaw", "config.json"),
+      ).text()
+
+      expect(await Bun.file(activeShim).exists()).toBe(true)
+      expect(await Bun.file(implementationShim).exists()).toBe(true)
+      expect(configText).toContain('"telegram"')
+      expect(configText).toContain('"bot_token": "telegram-token"')
+      expect(configText).toContain('"allow_from": ["12345","67890"]')
     } finally {
       await cleanupRoot(root)
     }
@@ -931,9 +981,13 @@ describe("tier 1 clawctl cli", () => {
       const firstStatus = await runCli(root, ["status"])
       expect(firstStatus).toContain("state: running")
       expect(firstStatus).toContain("pid:")
+      expect(await Bun.file(join(root, "bin", "claw")).exists()).toBe(true)
+      expect(await Bun.file(join(root, "bin", "nullclaw")).exists()).toBe(true)
 
       const stopOutput = await runCli(root, ["stop"])
       expect(stopOutput).toBe("stopped nullclaw@v2026.3.7")
+      expect(await Bun.file(join(root, "bin", "claw")).exists()).toBe(false)
+      expect(await Bun.file(join(root, "bin", "nullclaw")).exists()).toBe(false)
 
       const stoppedStatus = await runCli(root, ["status", "nullclaw@v2026.3.7"])
       expect(stoppedStatus).toContain("state: stopped")
@@ -944,6 +998,9 @@ describe("tier 1 clawctl cli", () => {
       const newStatus = await runCli(root, ["status"])
       expect(newStatus).toContain("picoclaw@v0.2.0")
       expect(newStatus).toContain("state: running")
+      expect(await Bun.file(join(root, "bin", "claw")).exists()).toBe(true)
+      expect(await Bun.file(join(root, "bin", "picoclaw")).exists()).toBe(true)
+      expect(await Bun.file(join(root, "bin", "nullclaw")).exists()).toBe(false)
 
       const oldStatus = await runCli(root, ["status", "nullclaw@v2026.3.7"])
       expect(oldStatus).toContain("state: stopped")
@@ -1133,9 +1190,9 @@ describe("tier 3 clawctl cli", () => {
   test("doctor validates docker-first piclaw metadata", async () => {
     const root = await createTempRoot()
     try {
-      const output = await runCli(root, ["doctor", "piclaw"])
+      const output = await runCliExpectFailure(root, ["doctor", "piclaw"])
       expect(output).toContain("ok: piclaw:docker:tool:")
-      expect(output).toContain("doctor: ok")
+      expect(output).toContain("doctor: failed")
     } finally {
       await cleanupRoot(root)
     }
@@ -1144,10 +1201,10 @@ describe("tier 3 clawctl cli", () => {
   test("doctor validates local install metadata for ironclaw", async () => {
     const root = await createTempRoot()
     try {
-      const output = await runCli(root, ["doctor", "ironclaw"])
+      const output = await runCliExpectFailure(root, ["doctor", "ironclaw"])
       expect(output).toContain("ok: ironclaw:local:tool:tar")
       expect(output).toContain("ok: ironclaw:install: not installed")
-      expect(output).toContain("doctor: ok")
+      expect(output).toContain("doctor: failed")
     } finally {
       await cleanupRoot(root)
     }

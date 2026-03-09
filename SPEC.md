@@ -25,7 +25,6 @@ Implemented today:
 Modeled but not implemented yet:
 
 - Docker runtime backend
-- Telegram-driven runtime ownership
 - richer help text and examples
 
 ## Goals
@@ -153,6 +152,8 @@ Current shared config keys:
 - `CLAW_MODEL`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_BOT_USERNAME`
+- `TELEGRAM_CHAT_ID`
+- `TELEGRAM_ALLOWED_FROM`
 
 Current defaults:
 
@@ -165,18 +166,20 @@ Implementation notes:
 - config is loaded through Effect `Config`
 - secret values are represented as `Redacted` in memory
 - most current adapters require only `CLAW_API_KEY`, `CLAW_BASE_URL`, and `CLAW_MODEL`
-- Telegram keys exist in shared config but are not yet used by the current local adapters
+- supported adapters can also render or export Telegram settings from the shared config
+- `use` rewrites active shims under `~/.clawctl/bin/`
 
 ## Runtime Model
 
-Current runtime model is local and managed by a clawctl-owned background process for activatable claws.
+Current runtime model is local and managed through supervised daemons.
 
 For claws that support activation:
 
 - `use` stops the previous managed runtime, starts the selected one, and writes the active selection
 - runtime config is rendered into `runtimes/local/<impl>/<version>/home`
-- a clawctl-managed background process listens on localhost and proxies `chat`, `ping`, and health requests
-- `chat` and `ping` go through that managed runtime instead of spawning directly from the foreground command
+- `use` also rewrites `~/.clawctl/bin/claw` and `~/.clawctl/bin/<implementation>`
+- claws run either as native supervised daemons or through a clawctl-managed proxy daemon, depending on the adapter
+- `chat`, `ping`, and `status` target the active managed daemon path for that adapter
 
 Current lifecycle limitations:
 

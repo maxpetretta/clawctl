@@ -20,7 +20,7 @@ Current limits:
 
 - supported host platform: `darwin-arm64`
 - `docker` is modeled but not implemented yet
-- Telegram keys exist in shared config but are not wired into live adapters yet
+- `nanoclaw` still cannot handle `chat` or `ping` because upstream does not expose a stable local loopback transport
 - `piclaw` and `ironclaw` are not fully activatable yet
 
 ## Supported Claws
@@ -71,9 +71,11 @@ bun run cli --help
 Common examples:
 
 ```bash
+export PATH="$HOME/.clawctl/bin:$PATH"
 bun run cli list
 bun run cli versions openclaw
 bun run cli config set CLAW_API_KEY sk-...
+bun run cli config set TELEGRAM_BOT_TOKEN 123456:ABCDEF...
 bun run cli install openclaw
 bun run cli use openclaw
 bun run cli chat "Summarize the current workspace."
@@ -120,14 +122,24 @@ bun run --cwd packages/cli test
 - `CLAW_MODEL`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_BOT_USERNAME`
+- `TELEGRAM_CHAT_ID`
+- `TELEGRAM_ALLOWED_FROM`
 
-In practice, the current local adapters mainly use:
+Current live adapters use:
 
 - `CLAW_API_KEY`
 - `CLAW_BASE_URL`
 - `CLAW_MODEL`
+- adapter-specific Telegram settings where supported
 
 Shared config lives at `~/.clawctl/config/shared.env`. Each runtime still gets its own isolated `HOME`, config files, workspace, and state directory.
+
+When you run `clawctl use ...`, it also updates active shims under `~/.clawctl/bin/`:
+
+- `claw`
+- `<active-implementation>`
+
+Add that directory to `PATH` if you want the active claw CLI to resolve natively.
 
 ## Documentation
 

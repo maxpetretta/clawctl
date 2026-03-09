@@ -27,10 +27,13 @@ describe("paths service", () => {
       Effect.gen(function* () {
         const paths = yield* ClawctlPathsService
         return {
+          activeShim: paths.activeShim(),
+          binDir: paths.paths.binDir,
           currentFile: paths.paths.currentFile,
           installMetadataFile: paths.installMetadataFile("openclaw", "2026.3.7"),
           installParentDir: paths.installParentDir("openclaw"),
           installRoot: paths.installRoot("openclaw", "2026.3.7"),
+          implementationShim: paths.implementationShim("openclaw"),
           partialInstallRoot: paths.partialInstallRoot("openclaw", "2026.3.7", "abc"),
           runtimeHomeDir: paths.runtimeHomeDir("openclaw", "2026.3.7"),
           runtimeImplementationDir: paths.runtimeImplementationDir("openclaw"),
@@ -42,6 +45,9 @@ describe("paths service", () => {
       makePathsLayer(root),
     )
 
+    expect(result.binDir).toContain("/bin")
+    expect(result.activeShim).toContain("/bin/claw")
+    expect(result.implementationShim).toContain("/bin/openclaw")
     expect(result.installRoot).toContain("/installs/local/openclaw/2026.3.7")
     expect(result.installParentDir).toContain("/installs/local/openclaw")
     expect(result.partialInstallRoot).toContain("2026.3.7.partial-abc")

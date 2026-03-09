@@ -121,3 +121,4 @@ response_cache_max_entries = 5000
 snapshot_enabled = false
 snapshot_on_hygiene = false
 auto_hydrate = true
+{{ZEROCLAW_TELEGRAM_BLOCK}}

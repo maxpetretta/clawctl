@@ -23,6 +23,8 @@ describe("shared config", () => {
       CLAW_MODEL: defaultSharedConfig.CLAW_MODEL,
       TELEGRAM_BOT_TOKEN: "token",
       TELEGRAM_BOT_USERNAME: "clawctl_bot",
+      TELEGRAM_CHAT_ID: "12345",
+      TELEGRAM_ALLOWED_FROM: "12345,67890",
     })
 
     expect(parseSharedConfigEntries(source)).toEqual({
@@ -31,6 +33,8 @@ describe("shared config", () => {
       CLAW_MODEL: defaultSharedConfig.CLAW_MODEL,
       TELEGRAM_BOT_TOKEN: "token",
       TELEGRAM_BOT_USERNAME: "clawctl_bot",
+      TELEGRAM_CHAT_ID: "12345",
+      TELEGRAM_ALLOWED_FROM: "12345,67890",
     })
   })
 
@@ -47,6 +51,8 @@ describe("shared config", () => {
       CLAW_MODEL: defaultSharedConfig.CLAW_MODEL,
       TELEGRAM_BOT_TOKEN: "token",
       TELEGRAM_BOT_USERNAME: defaultSharedConfig.TELEGRAM_BOT_USERNAME,
+      TELEGRAM_CHAT_ID: defaultSharedConfig.TELEGRAM_CHAT_ID,
+      TELEGRAM_ALLOWED_FROM: defaultSharedConfig.TELEGRAM_ALLOWED_FROM,
     })
   })
 
@@ -59,6 +65,8 @@ describe("shared config", () => {
           CLAW_MODEL: "ok",
           TELEGRAM_BOT_TOKEN: Redacted.make(""),
           TELEGRAM_BOT_USERNAME: "",
+          TELEGRAM_CHAT_ID: "",
+          TELEGRAM_ALLOWED_FROM: "",
         },
         ["CLAW_API_KEY", "CLAW_MODEL", "TELEGRAM_BOT_TOKEN"],
       ),

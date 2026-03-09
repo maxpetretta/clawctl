@@ -16,7 +16,7 @@ const facts = [
   },
   {
     title: "What is not live yet",
-    copy: "Docker is modeled but not implemented. Telegram credentials exist in shared config, but the live adapters do not consume them yet.",
+    copy: "Docker is modeled but not implemented. nanoclaw still lacks a local message transport, and piclaw/ironclaw are not fully activatable yet.",
   },
 ]
 
@@ -38,12 +38,21 @@ const supportedClaws = [
   },
 ]
 
-const sharedConfig = ["CLAW_API_KEY", "CLAW_BASE_URL", "CLAW_MODEL", "TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_USERNAME"]
+const sharedConfig = [
+  "CLAW_API_KEY",
+  "CLAW_BASE_URL",
+  "CLAW_MODEL",
+  "TELEGRAM_BOT_TOKEN",
+  "TELEGRAM_BOT_USERNAME",
+  "TELEGRAM_CHAT_ID",
+  "TELEGRAM_ALLOWED_FROM",
+]
 
 const commands = [
   "clawctl list",
   "clawctl versions openclaw",
   "clawctl config set CLAW_API_KEY sk-...",
+  "clawctl config set TELEGRAM_BOT_TOKEN 123456:ABCDEF...",
   "clawctl install openclaw",
   "clawctl use openclaw",
   'clawctl chat "Summarize the current workspace."',
@@ -130,8 +139,8 @@ const packages = [
         <article class="panel">
           <p class="section-label">shared config</p>
           <p>
-            Shared credentials live in <code>~/.clawctl/config/shared.env</code>. Current local adapters mainly use
-            the API settings, but Telegram keys are already modeled.
+            Shared credentials live in <code>~/.clawctl/config/shared.env</code>. Supported adapters can render API
+            and Telegram settings from that shared source of truth.
           </p>
           <ul>
             {sharedConfig.map((key) => (
@@ -176,7 +185,7 @@ const packages = [
             </li>
             <li>
               <strong>Telegram</strong>
-              <span>Keys are shared, but the live adapters do not use them yet.</span>
+              <span>Shared config can be rendered or exported into adapters that support Telegram.</span>
             </li>
             <li>
               <strong>Tier 3</strong>

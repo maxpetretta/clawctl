@@ -47,7 +47,7 @@
     "slots": {
       "memory": "none"
     }
-  },
+  }{{OPENCLAW_TELEGRAM_CHANNELS_BLOCK}},
   "cron": {
     "enabled": false
   }
