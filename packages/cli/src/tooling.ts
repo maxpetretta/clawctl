@@ -1,9 +1,3 @@
-import { execFile } from "node:child_process"
-import { access } from "node:fs/promises"
-import { promisify } from "node:util"
-
-const execFileAsync = promisify(execFile)
-
 export function npmExecutable(): string {
   return process.env.CLAWCTL_NPM_BIN ?? "npm"
 }
@@ -22,21 +16,4 @@ export function dockerExecutable(): string {
 
 export function bunExecutable(): string {
   return process.env.CLAWCTL_BUN_BIN ?? "bun"
-}
-
-/** @deprecated Use the Effect-based commandExists in ClawctlMaintenanceService instead. */
-export async function commandExists(command: string): Promise<boolean> {
-  try {
-    if (command.includes("/")) {
-      await access(command)
-      return true
-    }
-
-    await execFileAsync("sh", ["-lc", `command -v ${JSON.stringify(command)} >/dev/null 2>&1`], {
-      env: process.env,
-    })
-    return true
-  } catch {
-    return false
-  }
 }

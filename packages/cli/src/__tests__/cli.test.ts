@@ -220,8 +220,16 @@ async function createFakeInstallers(root: string): Promise<void> {
   await writeFile(join(repoDir, "bitclaw", "README.md"), "# bitclaw fixture\n", "utf8")
   await writeFile(join(repoDir, "hermes", "README.md"), "# hermes fixture\n", "utf8")
   await writeFile(join(repoDir, "hermes", "package.json"), '{ "name": "hermes-agent-fixture" }\n', "utf8")
-  await writeFile(join(repoDir, "hermes", "mini-swe-agent", "pyproject.toml"), "[project]\nname='mini-swe-agent'\n", "utf8")
-  await writeFile(join(repoDir, "hermes", "tinker-atropos", "pyproject.toml"), "[project]\nname='tinker-atropos'\n", "utf8")
+  await writeFile(
+    join(repoDir, "hermes", "mini-swe-agent", "pyproject.toml"),
+    "[project]\nname='mini-swe-agent'\n",
+    "utf8",
+  )
+  await writeFile(
+    join(repoDir, "hermes", "tinker-atropos", "pyproject.toml"),
+    "[project]\nname='tinker-atropos'\n",
+    "utf8",
+  )
 
   await writeFile(
     fakeNpmPath,

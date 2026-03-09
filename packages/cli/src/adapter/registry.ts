@@ -2,7 +2,7 @@ import { existsSync } from "node:fs"
 import { createConnection } from "node:net"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-
+import { gitExecutable, npmExecutable, uvExecutable } from "../tooling.ts"
 import type {
   BackendManifest,
   CapabilityManifest,
@@ -123,6 +123,11 @@ type AdapterRegistration = RegisteredImplementation & {
   }
   implementationHooks: ImplementationHook
 }
+
+type RuntimeEnvInput = Parameters<ImplementationHook["runtimeEnv"]>[0]
+type StartInput = Parameters<NonNullable<ImplementationHook["start"]>>[0]
+type StartResult = Awaited<ReturnType<NonNullable<ImplementationHook["start"]>>>
+type StatusInput = Parameters<NonNullable<ImplementationHook["status"]>>[0]
 
 const currentDir = dirname(fileURLToPath(import.meta.url))
 const packageDir = resolve(currentDir, "../..")
@@ -302,6 +307,82 @@ function portAcceptsConnections(port: number, host = "127.0.0.1", timeoutMs = 50
   })
 }
 
+function resolvedStart(result: StartResult): Promise<StartResult> {
+  return Promise.resolve(result)
+}
+
+function clawctlRuntimeEnv(
+  input: Pick<RuntimeEnvInput, "homeDir" | "installRoot">,
+  extra: NodeJS.ProcessEnv = {},
+): NodeJS.ProcessEnv {
+  return {
+    HOME: input.homeDir,
+    CLAWCTL_INSTALL_ROOT: input.installRoot,
+    ...extra,
+  }
+}
+
+function managedDaemonEnv(
+  input: Pick<StartInput, "homeDir" | "installRoot" | "runtimeDir" | "stateDir">,
+  extra: NodeJS.ProcessEnv = {},
+): NodeJS.ProcessEnv {
+  return {
+    ...clawctlRuntimeEnv(input, extra),
+    CLAWCTL_RUNTIME_DIR: input.runtimeDir,
+    CLAWCTL_STATE_DIR: input.stateDir,
+  }
+}
+
+function spawnExitCodeIsZero(command: string[], env: NodeJS.ProcessEnv): Promise<boolean> {
+  const child = Bun.spawn(command, {
+    env: {
+      ...process.env,
+      ...env,
+    },
+    stderr: "ignore",
+    stdout: "ignore",
+  })
+  return child.exited.then((exitCode) => exitCode === 0)
+}
+
+function makeBinaryStatusHook(
+  build: (input: StatusInput) => { command: string[]; env: NodeJS.ProcessEnv },
+): NonNullable<ImplementationHook["status"]> {
+  return (input) => {
+    const { command, env } = build(input)
+    return spawnExitCodeIsZero(command, env)
+  }
+}
+
+function makePortStatusHook(options?: {
+  readonly checkConnections?: boolean
+}): NonNullable<ImplementationHook["status"]> {
+  return ({ port }) =>
+    Promise.resolve(
+      port === undefined ? false : options?.checkConnections === true ? portAcceptsConnections(port) : true,
+    )
+}
+
+async function runInheritedCommand(
+  command: string[],
+  options: {
+    readonly allowFailure?: boolean
+    readonly cwd?: string
+    readonly failureMessage: string
+  },
+): Promise<void> {
+  const child = Bun.spawn(command, {
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+    env: process.env,
+    stderr: "inherit",
+    stdout: "inherit",
+  })
+  const exitCode = await child.exited
+  if (exitCode !== 0 && options.allowFailure !== true) {
+    throw new Error(options.failureMessage)
+  }
+}
+
 function makeReleaseBackend(input: BackendManifest["install"][number], runtime: RuntimeManifest): BackendManifest {
   return {
     kind: "local",
@@ -380,11 +461,7 @@ function hermesEnvFile(config: Record<string, string>, workspaceDir: string): st
   ].join("\n")
 }
 
-function hermesRuntimeEnv(input: {
-  homeDir: string
-  installRoot: string
-  workspaceDir: string
-}): NodeJS.ProcessEnv {
+function hermesRuntimeEnv(input: { homeDir: string; installRoot: string; workspaceDir: string }): NodeJS.ProcessEnv {
   return {
     HOME: input.homeDir,
     HERMES_HOME: input.homeDir,
@@ -524,35 +601,17 @@ const nullclawRegistration = {
         }),
       },
     ],
-    runtimeEnv: ({ homeDir, installRoot }) => ({
-      HOME: homeDir,
-      CLAWCTL_INSTALL_ROOT: installRoot,
-    }),
+    runtimeEnv: ({ homeDir, installRoot }) => clawctlRuntimeEnv({ homeDir, installRoot }),
     start: ({ binaryPath, homeDir, installRoot, runtimeDir, stateDir }) =>
-      Promise.resolve({
+      resolvedStart({
         command: binaryPath,
         args: ["gateway"],
-        env: {
-          HOME: homeDir,
-          CLAWCTL_INSTALL_ROOT: installRoot,
-          CLAWCTL_RUNTIME_DIR: runtimeDir,
-          CLAWCTL_STATE_DIR: stateDir,
-        },
+        env: managedDaemonEnv({ homeDir, installRoot, runtimeDir, stateDir }),
       }),
-    status: async ({ binaryPath, homeDir, installRoot, runtimeDir, stateDir }) => {
-      const child = Bun.spawn([binaryPath, "status"], {
-        env: {
-          ...process.env,
-          HOME: homeDir,
-          CLAWCTL_INSTALL_ROOT: installRoot,
-          CLAWCTL_RUNTIME_DIR: runtimeDir,
-          CLAWCTL_STATE_DIR: stateDir,
-        },
-        stderr: "ignore",
-        stdout: "ignore",
-      })
-      return (await child.exited) === 0
-    },
+    status: makeBinaryStatusHook(({ binaryPath, homeDir, installRoot, runtimeDir, stateDir }) => ({
+      command: [binaryPath, "status"],
+      env: managedDaemonEnv({ homeDir, installRoot, runtimeDir, stateDir }),
+    })),
   },
 } satisfies AdapterRegistration
 
@@ -624,38 +683,17 @@ const picoclawRegistration = {
         }),
       },
     ],
-    runtimeEnv: ({ homeDir, installRoot }) => ({
-      HOME: homeDir,
-      PICOCLAW_HOME: homeDir,
-      CLAWCTL_INSTALL_ROOT: installRoot,
-    }),
+    runtimeEnv: ({ homeDir, installRoot }) => clawctlRuntimeEnv({ homeDir, installRoot }, { PICOCLAW_HOME: homeDir }),
     start: ({ binaryPath, homeDir, installRoot, runtimeDir, stateDir }) =>
-      Promise.resolve({
+      resolvedStart({
         command: binaryPath,
         args: ["gateway"],
-        env: {
-          HOME: homeDir,
-          PICOCLAW_HOME: homeDir,
-          CLAWCTL_INSTALL_ROOT: installRoot,
-          CLAWCTL_RUNTIME_DIR: runtimeDir,
-          CLAWCTL_STATE_DIR: stateDir,
-        },
+        env: managedDaemonEnv({ homeDir, installRoot, runtimeDir, stateDir }, { PICOCLAW_HOME: homeDir }),
       }),
-    status: async ({ binaryPath, homeDir, installRoot, runtimeDir, stateDir }) => {
-      const child = Bun.spawn([binaryPath, "status"], {
-        env: {
-          ...process.env,
-          HOME: homeDir,
-          PICOCLAW_HOME: homeDir,
-          CLAWCTL_INSTALL_ROOT: installRoot,
-          CLAWCTL_RUNTIME_DIR: runtimeDir,
-          CLAWCTL_STATE_DIR: stateDir,
-        },
-        stderr: "ignore",
-        stdout: "ignore",
-      })
-      return (await child.exited) === 0
-    },
+    status: makeBinaryStatusHook(({ binaryPath, homeDir, installRoot, runtimeDir, stateDir }) => ({
+      command: [binaryPath, "status"],
+      env: managedDaemonEnv({ homeDir, installRoot, runtimeDir, stateDir }, { PICOCLAW_HOME: homeDir }),
+    })),
   },
 } satisfies AdapterRegistration
 
@@ -718,35 +756,17 @@ const zeroclawRegistration = {
         }),
       },
     ],
-    runtimeEnv: ({ homeDir, installRoot }) => ({
-      HOME: homeDir,
-      CLAWCTL_INSTALL_ROOT: installRoot,
-    }),
+    runtimeEnv: ({ homeDir, installRoot }) => clawctlRuntimeEnv({ homeDir, installRoot }),
     start: ({ binaryPath, homeDir, installRoot, runtimeDir, stateDir }) =>
-      Promise.resolve({
+      resolvedStart({
         command: binaryPath,
         args: ["daemon"],
-        env: {
-          HOME: homeDir,
-          CLAWCTL_INSTALL_ROOT: installRoot,
-          CLAWCTL_RUNTIME_DIR: runtimeDir,
-          CLAWCTL_STATE_DIR: stateDir,
-        },
+        env: managedDaemonEnv({ homeDir, installRoot, runtimeDir, stateDir }),
       }),
-    status: async ({ binaryPath, homeDir, installRoot, runtimeDir, stateDir }) => {
-      const child = Bun.spawn([binaryPath, "status"], {
-        env: {
-          ...process.env,
-          HOME: homeDir,
-          CLAWCTL_INSTALL_ROOT: installRoot,
-          CLAWCTL_RUNTIME_DIR: runtimeDir,
-          CLAWCTL_STATE_DIR: stateDir,
-        },
-        stderr: "ignore",
-        stdout: "ignore",
-      })
-      return (await child.exited) === 0
-    },
+    status: makeBinaryStatusHook(({ binaryPath, homeDir, installRoot, runtimeDir, stateDir }) => ({
+      command: [binaryPath, "status"],
+      env: managedDaemonEnv({ homeDir, installRoot, runtimeDir, stateDir }),
+    })),
   },
 } satisfies AdapterRegistration
 
@@ -860,7 +880,7 @@ const openclawRegistration = {
     }),
     start: ({ binaryPath, homeDir, stateDir }) => {
       const port = 28789
-      return Promise.resolve({
+      return resolvedStart({
         command: binaryPath,
         args: ["gateway", "run", "--port", String(port), "--allow-unconfigured", "--force"],
         env: {
@@ -875,12 +895,7 @@ const openclawRegistration = {
         port,
       })
     },
-    status: async ({ port }) => {
-      if (port === undefined) {
-        return false
-      }
-      return await portAcceptsConnections(port)
-    },
+    status: makePortStatusHook({ checkConnections: true }),
   },
 } satisfies AdapterRegistration
 
@@ -947,14 +962,10 @@ const nanobotRegistration = {
         }),
       },
     ],
-    runtimeEnv: ({ homeDir, installRoot }) => ({
-      HOME: homeDir,
-      CLAWCTL_INSTALL_ROOT: installRoot,
-      NO_COLOR: "1",
-    }),
+    runtimeEnv: ({ homeDir, installRoot }) => clawctlRuntimeEnv({ homeDir, installRoot }, { NO_COLOR: "1" }),
     start: ({ binaryPath, homeDir, installRoot, workspaceDir }) => {
       const port = 28080
-      return Promise.resolve({
+      return resolvedStart({
         command: binaryPath,
         args: [
           "gateway",
@@ -973,9 +984,7 @@ const nanobotRegistration = {
         port,
       })
     },
-    status: async ({ port }) => {
-      return port !== undefined
-    },
+    status: makePortStatusHook(),
   },
 } satisfies AdapterRegistration
 
@@ -1034,48 +1043,28 @@ const hermesRegistration = {
     ],
     install: async ({ installRoot }) => {
       const repoDir = resolve(installRoot, "repo")
-      const git = process.env.CLAWCTL_GIT_BIN ?? "git"
-      const uv = process.env.CLAWCTL_UV_BIN ?? "uv"
-      const npm = process.env.CLAWCTL_NPM_BIN ?? "npm"
+      const git = gitExecutable()
+      const uv = uvExecutable()
+      const npm = npmExecutable()
       const pythonBin = resolve(repoDir, "venv", "bin", "python")
       const chatHelper = resolve(installRoot, "clawctl-hermes-chat.py")
 
-      const runCommand = async (
-        command: string[],
-        options: {
-          allowFailure?: boolean
-          cwd?: string
-          failureMessage: string
-        },
-      ) => {
-        const child = Bun.spawn(command, {
-          ...(options.cwd ? { cwd: options.cwd } : {}),
-          env: process.env,
-          stderr: "inherit",
-          stdout: "inherit",
-        })
-        const exitCode = await child.exited
-        if (exitCode !== 0 && options.allowFailure !== true) {
-          throw new Error(options.failureMessage)
-        }
-      }
-
-      await runCommand([git, "-C", repoDir, "submodule", "update", "--init", "--recursive"], {
+      await runInheritedCommand([git, "-C", repoDir, "submodule", "update", "--init", "--recursive"], {
         cwd: repoDir,
         failureMessage: "hermes bootstrap failed during git submodule update",
       })
-      await runCommand([uv, "venv", "venv", "--python", "3.11"], {
+      await runInheritedCommand([uv, "venv", "venv", "--python", "3.11"], {
         cwd: repoDir,
         failureMessage: "hermes bootstrap failed during uv venv",
       })
 
       try {
-        await runCommand([uv, "pip", "install", "--python", pythonBin, "-e", ".[all]"], {
+        await runInheritedCommand([uv, "pip", "install", "--python", pythonBin, "-e", ".[all]"], {
           cwd: repoDir,
           failureMessage: "hermes bootstrap failed during uv pip install -e .[all]",
         })
       } catch {
-        await runCommand([uv, "pip", "install", "--python", pythonBin, "-e", "."], {
+        await runInheritedCommand([uv, "pip", "install", "--python", pythonBin, "-e", "."], {
           cwd: repoDir,
           failureMessage: "hermes bootstrap failed during uv pip install -e .",
         })
@@ -1083,7 +1072,7 @@ const hermesRegistration = {
 
       for (const submoduleDir of ["mini-swe-agent", "tinker-atropos"]) {
         if (existsSync(resolve(repoDir, submoduleDir, "pyproject.toml"))) {
-          await runCommand([uv, "pip", "install", "--python", pythonBin, "-e", `./${submoduleDir}`], {
+          await runInheritedCommand([uv, "pip", "install", "--python", pythonBin, "-e", `./${submoduleDir}`], {
             cwd: repoDir,
             allowFailure: true,
             failureMessage: `hermes optional submodule install failed: ${submoduleDir}`,
@@ -1092,7 +1081,7 @@ const hermesRegistration = {
       }
 
       if (existsSync(resolve(repoDir, "package.json"))) {
-        await runCommand([npm, "install", "--silent"], {
+        await runInheritedCommand([npm, "install", "--silent"], {
           cwd: repoDir,
           allowFailure: true,
           failureMessage: "hermes optional npm install failed",
@@ -1150,7 +1139,7 @@ if __name__ == "__main__":
         workspaceDir,
       }),
     start: ({ binaryPath, homeDir, installRoot, workspaceDir }) =>
-      Promise.resolve({
+      resolvedStart({
         command: binaryPath,
         args: ["-m", "hermes_cli.main", "gateway", "run", "--replace"],
         env: hermesRuntimeEnv({
@@ -1159,21 +1148,14 @@ if __name__ == "__main__":
           workspaceDir,
         }),
       }),
-    status: async ({ binaryPath, homeDir, installRoot, workspaceDir }) => {
-      const child = Bun.spawn([binaryPath, "-m", "hermes_cli.main", "gateway", "status"], {
-        env: {
-          ...process.env,
-          ...hermesRuntimeEnv({
-            homeDir,
-            installRoot,
-            workspaceDir,
-          }),
-        },
-        stderr: "ignore",
-        stdout: "ignore",
-      })
-      return (await child.exited) === 0
-    },
+    status: makeBinaryStatusHook(({ binaryPath, homeDir, installRoot, workspaceDir }) => ({
+      command: [binaryPath, "-m", "hermes_cli.main", "gateway", "status"],
+      env: hermesRuntimeEnv({
+        homeDir,
+        installRoot,
+        workspaceDir,
+      }),
+    })),
   },
 } satisfies AdapterRegistration
 
@@ -1212,29 +1194,19 @@ const nanoclawRegistration = {
     ],
   } satisfies ImplementationManifest,
   ...makeBootstrapInstallOnlyHooks(async ({ installRoot }) => {
-      const repoDir = resolve(installRoot, "repo")
-      const install = Bun.spawn([process.env.CLAWCTL_NPM_BIN ?? "npm", "ci"], {
-        cwd: repoDir,
-        env: process.env,
-        stderr: "inherit",
-        stdout: "inherit",
-      })
-      if ((await install.exited) !== 0) {
-        throw new Error("nanoclaw bootstrap failed during npm ci")
-      }
-      const build = Bun.spawn([process.env.CLAWCTL_NPM_BIN ?? "npm", "run", "build"], {
-        cwd: repoDir,
-        env: process.env,
-        stderr: "inherit",
-        stdout: "inherit",
-      })
-      if ((await build.exited) !== 0) {
-        throw new Error("nanoclaw bootstrap failed during npm run build")
-      }
-      return {
-        entrypointCommand: ["node", resolve(repoDir, "dist", "index.js")],
-      }
-    }),
+    const repoDir = resolve(installRoot, "repo")
+    await runInheritedCommand([npmExecutable(), "ci"], {
+      cwd: repoDir,
+      failureMessage: "nanoclaw bootstrap failed during npm ci",
+    })
+    await runInheritedCommand([npmExecutable(), "run", "build"], {
+      cwd: repoDir,
+      failureMessage: "nanoclaw bootstrap failed during npm run build",
+    })
+    return {
+      entrypointCommand: ["node", resolve(repoDir, "dist", "index.js")],
+    }
+  }),
 } satisfies AdapterRegistration
 
 const bitclawRegistration = {
@@ -1272,19 +1244,14 @@ const bitclawRegistration = {
     ],
   } satisfies ImplementationManifest,
   ...makeBootstrapInstallOnlyHooks(async ({ installRoot }) => {
-      const repoDir = resolve(installRoot, "repo")
-      const install = Bun.spawn([process.env.CLAWCTL_NPM_BIN ?? "npm", "ci"], {
-        cwd: repoDir,
-        env: process.env,
-        stderr: "inherit",
-        stdout: "inherit",
-      })
-      if ((await install.exited) !== 0) {
-        throw new Error("bitclaw bootstrap failed during npm ci")
-      }
-      await Bun.write(
-        resolve(repoDir, "clawctl-daemon.ts"),
-        `import { dirname } from "node:path";
+    const repoDir = resolve(installRoot, "repo")
+    await runInheritedCommand([npmExecutable(), "ci"], {
+      cwd: repoDir,
+      failureMessage: "bitclaw bootstrap failed during npm ci",
+    })
+    await Bun.write(
+      resolve(repoDir, "clawctl-daemon.ts"),
+      `import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startContainer, stopContainer } from "./src/runtime.ts";
 
@@ -1303,15 +1270,15 @@ process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 setInterval(() => {}, 1000);
 `,
-      )
-      return {
-        entrypointCommand: [
-          "node",
-          resolve(repoDir, "node_modules", "tsx", "dist", "cli.mjs"),
-          resolve(repoDir, "clawctl-daemon.ts"),
-        ],
-      }
-    }),
+    )
+    return {
+      entrypointCommand: [
+        "node",
+        resolve(repoDir, "node_modules", "tsx", "dist", "cli.mjs"),
+        resolve(repoDir, "clawctl-daemon.ts"),
+      ],
+    }
+  }),
 } satisfies AdapterRegistration
 
 const ironclawRegistration = makeReleaseInstallOnlyRegistration({

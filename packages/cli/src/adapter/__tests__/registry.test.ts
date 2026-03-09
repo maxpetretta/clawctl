@@ -81,7 +81,11 @@ describe("adapter registry", () => {
       "hi",
     ])
     expect(
-      hermes.implementationHooks.buildChatCommand({ binaryPath: "/tmp/install/repo/venv/bin/python", message: "hi", ...runtimeInput }),
+      hermes.implementationHooks.buildChatCommand({
+        binaryPath: "/tmp/install/repo/venv/bin/python",
+        message: "hi",
+        ...runtimeInput,
+      }),
     ).toEqual(["/tmp/install/repo/venv/bin/python", "/tmp/install/clawctl-hermes-chat.py", "hi"])
 
     const nullFiles = await nullclaw.implementationHooks.renderConfig({ config, workspaceDir: "/tmp/workspace" })
