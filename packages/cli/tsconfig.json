@@ -2,7 +2,15 @@
   "$schema": "https://json.schemastore.org/tsconfig",
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "incremental": true,
     "lib": ["es2022", "dom"],
+    "module": "preserve",
+    "plugins": [
+      {
+        "name": "@effect/language-service"
+      }
+    ],
+    "rewriteRelativeImportExtensions": true,
     "types": ["bun", "node"]
   },
   "include": ["src/**/*.ts"],

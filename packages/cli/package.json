@@ -12,15 +12,18 @@
     "build": "bun build --compile src/index.ts --outfile dist/clawctl",
     "start": "bun run src/index.ts",
     "dev": "bun run src/index.ts",
-    "lint": "biome check . && tsgo --noEmit",
+    "lint": "biome check . && bun run typecheck",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun test"
   },
   "dependencies": {
     "@effect/cli": "0.73.2",
-    "@effect/platform-node": "0.104.1",
+    "@effect/platform": "^0.94.5",
+    "@effect/platform-bun": "^0.87.1",
     "effect": "3.19.19"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/node": "^25.3.5"
   }
 }

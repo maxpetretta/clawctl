@@ -1,7 +1,5 @@
-import { access, readFile, writeFile } from "node:fs/promises"
-
-import type { ClawctlPaths } from "./paths.ts"
-import { ensureBaseLayout } from "./paths.ts"
+import { Config, ConfigProvider, Effect, Redacted } from "effect"
+import type { ConfigError } from "effect/ConfigError"
 
 export const defaultSharedConfig = {
   CLAW_API_KEY: "replace-me",
@@ -11,22 +9,25 @@ export const defaultSharedConfig = {
   TELEGRAM_BOT_USERNAME: "",
 } as const
 
-export type SharedConfig = Record<string, string>
+export type SharedConfigKey = keyof typeof defaultSharedConfig
 
-export async function ensureSharedConfig(paths: ClawctlPaths): Promise<void> {
-  await ensureBaseLayout(paths)
-  try {
-    await access(paths.sharedConfigFile)
-  } catch {
-    const lines = Object.entries(defaultSharedConfig).map(([key, value]) => `${key}=${value}`)
-    await writeFile(paths.sharedConfigFile, `${lines.join("\n")}\n`, "utf8")
-  }
-}
+export const sharedConfigSpec = Config.all({
+  CLAW_API_KEY: Config.redacted("CLAW_API_KEY"),
+  CLAW_BASE_URL: Config.string("CLAW_BASE_URL").pipe(Config.withDefault(defaultSharedConfig.CLAW_BASE_URL)),
+  CLAW_MODEL: Config.string("CLAW_MODEL").pipe(Config.withDefault(defaultSharedConfig.CLAW_MODEL)),
+  TELEGRAM_BOT_TOKEN: Config.redacted("TELEGRAM_BOT_TOKEN").pipe(
+    Config.withDefault(Redacted.make(defaultSharedConfig.TELEGRAM_BOT_TOKEN)),
+  ),
+  TELEGRAM_BOT_USERNAME: Config.string("TELEGRAM_BOT_USERNAME").pipe(
+    Config.withDefault(defaultSharedConfig.TELEGRAM_BOT_USERNAME),
+  ),
+})
 
-export async function readSharedConfig(paths: ClawctlPaths): Promise<SharedConfig> {
-  await ensureSharedConfig(paths)
-  const source = await readFile(paths.sharedConfigFile, "utf8")
-  const parsed: SharedConfig = {}
+export type SharedConfig = Config.Config.Success<typeof sharedConfigSpec>
+export type SharedConfigEntries = Record<string, string>
+
+export function parseSharedConfigEntries(source: string): SharedConfigEntries {
+  const parsed: SharedConfigEntries = {}
 
   for (const rawLine of source.split(/\r?\n/u)) {
     const line = rawLine.trim()
@@ -47,11 +48,36 @@ export async function readSharedConfig(paths: ClawctlPaths): Promise<SharedConfi
   return parsed
 }
 
-export async function setSharedConfigValue(paths: ClawctlPaths, key: string, value: string): Promise<void> {
-  const next = await readSharedConfig(paths)
-  next[key] = value
-  const lines = Object.entries(next)
+export function stringifySharedConfigEntries(entries: SharedConfigEntries): string {
+  return `${Object.entries(entries)
     .sort(([left], [right]) => left.localeCompare(right))
-    .map(([entryKey, entryValue]) => `${entryKey}=${entryValue}`)
-  await writeFile(paths.sharedConfigFile, `${lines.join("\n")}\n`, "utf8")
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n")}\n`
+}
+
+export function loadSharedConfig(entries: SharedConfigEntries): Effect.Effect<SharedConfig, ConfigError> {
+  const provider = ConfigProvider.fromMap(new Map(Object.entries(entries)))
+  return Effect.withConfigProvider(sharedConfigSpec, provider)
+}
+
+export function sharedConfigToEntries(config: SharedConfig): SharedConfigEntries {
+  return {
+    CLAW_API_KEY: Redacted.value(config.CLAW_API_KEY),
+    CLAW_BASE_URL: config.CLAW_BASE_URL,
+    CLAW_MODEL: config.CLAW_MODEL,
+    TELEGRAM_BOT_TOKEN: Redacted.value(config.TELEGRAM_BOT_TOKEN),
+    TELEGRAM_BOT_USERNAME: config.TELEGRAM_BOT_USERNAME,
+  }
+}
+
+export function sharedConfigValue(config: SharedConfig, key: string): string | undefined {
+  return sharedConfigToEntries(config)[key]
+}
+
+export function missingSharedConfigKeys(config: SharedConfig, keys: ReadonlyArray<string>): string[] {
+  const entries = sharedConfigToEntries(config)
+  return keys.filter((key) => {
+    const value = entries[key]?.trim()
+    return !value || value === "replace-me"
+  })
 }

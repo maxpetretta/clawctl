@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
 import { Args, Command, Options } from "@effect/cli"
-import { NodeContext, NodeRuntime } from "@effect/platform-node"
-import { Console, Effect } from "effect"
+import * as FetchHttpClient from "@effect/platform/FetchHttpClient"
+import * as Terminal from "@effect/platform/Terminal"
+import { BunContext, BunRuntime } from "@effect/platform-bun"
+import { Effect, Layer } from "effect"
 
 import { resolveRuntime, runtimeBackends } from "./model.ts"
 import { ClawctlLive, ClawctlService } from "./service.ts"
@@ -16,7 +18,9 @@ const requiredKey = Args.text({ name: "key" })
 const requiredValue = Args.text({ name: "value" })
 const requiredMessage = Args.text({ name: "message" })
 
-const rootCommand = Command.make("clawctl", {}, () => Console.log("Use a subcommand. Try clawctl --help."))
+const rootCommand = Command.make("clawctl", {}, () =>
+  Effect.flatMap(Terminal.Terminal, (terminal) => terminal.display("Use a subcommand. Try clawctl --help.\n")),
+)
 
 const installCommand = Command.make(
   "install",
@@ -66,7 +70,11 @@ const stopCommand = Command.make("stop", { runtime: runtimeOption, target: optio
   Effect.flatMap(ClawctlService, (service) => service.stop({ runtime: resolveRuntime(runtime), target })),
 )
 
-const configCommand = Command.make("config", {}, () => Console.log("Use `clawctl config get` or `clawctl config set`."))
+const configCommand = Command.make("config", {}, () =>
+  Effect.flatMap(Terminal.Terminal, (terminal) =>
+    terminal.display("Use `clawctl config get` or `clawctl config set`.\n"),
+  ),
+)
 
 const configGetCommand = Command.make("get", { key: requiredKey }, ({ key }) =>
   Effect.flatMap(ClawctlService, (service) => service.configGet(key)),
@@ -100,4 +108,6 @@ const cli = Command.run(command, {
   version: "v2026.3.8",
 })
 
-cli(process.argv).pipe(Effect.provide(ClawctlLive), Effect.provide(NodeContext.layer), NodeRuntime.runMain)
+const MainLayer = ClawctlLive.pipe(Layer.provideMerge(Layer.mergeAll(BunContext.layer, FetchHttpClient.layer)))
+
+cli(process.argv).pipe(Effect.provide(MainLayer), BunRuntime.runMain)
