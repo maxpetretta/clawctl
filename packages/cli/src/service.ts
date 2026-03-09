@@ -13,7 +13,11 @@ import { ClawctlMaintenanceService } from "./maintenance-service.ts"
 import type { RuntimeBackend } from "./model.ts"
 import { ClawctlPathsService } from "./paths-service.ts"
 import { ClawctlRuntimeService } from "./runtime-service.ts"
-import { makeParseReference, makeRequireInteractableImplementation, makeResolveRegistration } from "./service-helpers.ts"
+import {
+  makeParseReference,
+  makeRequireInteractableImplementation,
+  makeResolveRegistration,
+} from "./service-helpers.ts"
 import { sharedConfigValue } from "./shared-config.ts"
 import { ClawctlStoreService } from "./store-service.ts"
 
@@ -178,18 +182,16 @@ const clawctlServiceLayer = Layer.effect(
       try: () => validateAdapterRegistry(),
       catch: (cause) => userError("service.validateRegistry", cause instanceof Error ? cause.message : String(cause)),
     })
-    const parseOptionalImplementationTarget = Effect.fn("ClawctlService.parseOptionalImplementationTarget")(
-      function* (target: Option.Option<string>) {
-        if (Option.isNone(target)) {
-          return undefined
-        }
-        const parsed = yield* parseReference(target.value)
-        return parsed.implementation
-      },
-    )
-    const activationSupported = Effect.fn("ClawctlService.activationSupported")(function* (
-      implementation: string,
+    const parseOptionalImplementationTarget = Effect.fn("ClawctlService.parseOptionalImplementationTarget")(function* (
+      target: Option.Option<string>,
     ) {
+      if (Option.isNone(target)) {
+        return undefined
+      }
+      const parsed = yield* parseReference(target.value)
+      return parsed.implementation
+    })
+    const activationSupported = Effect.fn("ClawctlService.activationSupported")(function* (implementation: string) {
       const registration = yield* resolveRegistration(implementation)
       const localBackend = registration.manifest.backends.find(
         (backend) => backend.kind === "local" && backend.supported,
@@ -214,6 +216,35 @@ const clawctlServiceLayer = Layer.effect(
         return yield* userError("service.init", "unsupported shell; use one of: bash, zsh, fish")
       }
       return shellPathHint(detected, paths.paths.binDir, homeDir)
+    })
+    const writePathSetupHint = Effect.fn("ClawctlService.writePathSetupHint")(function* () {
+      const detectedShell = detectSupportedShell(process.env.SHELL)
+      yield* writeLine(`path hint: ${paths.paths.binDir} is not on PATH`)
+      if (detectedShell) {
+        const hint = shellPathHint(detectedShell, paths.paths.binDir, homeDir)
+        yield* writeLine(`add this to ${hint.configFileDisplay}:`)
+        yield* writeLine(hint.line)
+      } else {
+        yield* writeLine("add this to your shell config:")
+        yield* writeLine(`export PATH="${paths.paths.binDir}:$PATH"`)
+      }
+      yield* writeLine("or run: clawctl init")
+    })
+    const writePathPrecedenceHint = Effect.fn("ClawctlService.writePathPrecedenceHint")(function* (
+      implementation: string,
+      resolvedCommand: string,
+      activeImplementationShim: string,
+    ) {
+      yield* writeLine(`path warning: ${implementation} resolves to ${resolvedCommand}`)
+      yield* writeLine(
+        `move ${paths.paths.binDir} earlier on PATH so ${implementation} uses ${activeImplementationShim}`,
+      )
+      const detectedShell = detectSupportedShell(process.env.SHELL)
+      if (detectedShell) {
+        const hint = shellPathHint(detectedShell, paths.paths.binDir, homeDir)
+        yield* writeLine(`ensure this appears before other PATH setup in ${hint.configFileDisplay}:`)
+        yield* writeLine(hint.line)
+      }
     })
     const resolvePathCommand = Effect.fn("ClawctlService.resolvePathCommand")(function* (commandName: string) {
       for (const entry of pathEntries) {
@@ -504,31 +535,14 @@ const clawctlServiceLayer = Layer.effect(
       })
       yield* writeLine(`using ${activated.implementation}@${activated.resolvedVersion}`)
       if (!activeShimDirOnPath) {
-        const detectedShell = detectSupportedShell(process.env.SHELL)
-        yield* writeLine(`path hint: ${paths.paths.binDir} is not on PATH`)
-        if (detectedShell) {
-          const hint = shellPathHint(detectedShell, paths.paths.binDir, homeDir)
-          yield* writeLine(`add this to ${hint.configFileDisplay}:`)
-          yield* writeLine(hint.line)
-        } else {
-          yield* writeLine("add this to your shell config:")
-          yield* writeLine(`export PATH="${paths.paths.binDir}:$PATH"`)
-        }
-        yield* writeLine("or run: clawctl init")
+        yield* writePathSetupHint()
         return
       }
 
       const activeImplementationShim = paths.implementationShim(activated.implementation)
       const resolvedCommand = yield* resolvePathCommand(activated.implementation)
       if (resolvedCommand && resolvedCommand !== activeImplementationShim) {
-        yield* writeLine(`path warning: ${activated.implementation} resolves to ${resolvedCommand}`)
-        yield* writeLine(`move ${paths.paths.binDir} earlier on PATH so ${activated.implementation} uses ${activeImplementationShim}`)
-        const detectedShell = detectSupportedShell(process.env.SHELL)
-        if (detectedShell) {
-          const hint = shellPathHint(detectedShell, paths.paths.binDir, homeDir)
-          yield* writeLine(`ensure this appears before other PATH setup in ${hint.configFileDisplay}:`)
-          yield* writeLine(hint.line)
-        }
+        yield* writePathPrecedenceHint(activated.implementation, resolvedCommand, activeImplementationShim)
       }
     })
 

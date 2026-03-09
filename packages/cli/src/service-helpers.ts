@@ -33,10 +33,7 @@ export function makeRequireInteractableImplementation(
   module: string,
   resolveRegistration: (implementation: string) => Effect.Effect<RegisteredImplementation, ClawctlUserError>,
 ) {
-  return Effect.fn(`${module}.requireInteractableImplementation`)(function* (
-    implementation: string,
-    action: string,
-  ) {
+  return Effect.fn(`${module}.requireInteractableImplementation`)(function* (implementation: string, action: string) {
     const registration = yield* resolveRegistration(implementation)
     if (isInstallOnlyRegistration(registration)) {
       return yield* userError(`${module}.${action}`, installOnlyInteractionMessage(implementation))

@@ -6,16 +6,19 @@ import { fileURLToPath } from "node:url"
 import * as Command from "@effect/platform/Command"
 import * as CommandExecutor from "@effect/platform/CommandExecutor"
 import * as FileSystem from "@effect/platform/FileSystem"
+import { BunContext } from "@effect/platform-bun"
 import { Context, Effect, Layer, type Option } from "effect"
-
 import { installOnlyInteractionMessage, isInstallOnlyRegistration } from "./adapter/registry.ts"
-import { repairPythonScriptShebang } from "./installer-service.ts"
 import type { RuntimeManifest } from "./adapter/schema.ts"
 import type { InstallRecord, RegisteredImplementation, RuntimeRecord } from "./adapter/types.ts"
-import { BunContext } from "@effect/platform-bun"
 import { type ClawctlError, userError, withSystemError } from "./errors.ts"
+import { repairPythonScriptShebang } from "./installer-service.ts"
 import { ClawctlPathsLive, ClawctlPathsService } from "./paths-service.ts"
-import { makeParseReference, makeRequireInteractableImplementation, makeResolveRegistration } from "./service-helpers.ts"
+import {
+  makeParseReference,
+  makeRequireInteractableImplementation,
+  makeResolveRegistration,
+} from "./service-helpers.ts"
 import { missingSharedConfigKeys, sharedConfigToEntries } from "./shared-config.ts"
 import { ClawctlStoreLive, ClawctlStoreService } from "./store-service.ts"
 import type { TargetReference } from "./target.ts"
@@ -402,31 +405,26 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
 
       yield* withSystemError("runtime.makeRuntimeDir", fs.makeDirectory(runtimeDir, { recursive: true }))
     })
-    const readRuntimeLogExcerpt = Effect.fn("ClawctlRuntimeService.readRuntimeLogExcerpt")(function* (
-      record: InstallRecord,
-    ) {
+    const readRuntimeLogText = Effect.fn("ClawctlRuntimeService.readRuntimeLogText")(function* (record: InstallRecord) {
       const logFile = runtimeLogFile(record.implementation, record.resolvedVersion, record.backend)
       const exists = yield* withSystemError("runtime.logExists", fs.exists(logFile))
       if (!exists) {
         return undefined
       }
-      const source = yield* withSystemError("runtime.readLog", fs.readFileString(logFile)).pipe(
-        Effect.catchAll(() => Effect.succeed("")),
+      return yield* withSystemError("runtime.readLog", fs.readFileString(logFile)).pipe(
+        Effect.catchAll(() => Effect.void),
       )
-      return logExcerpt(source)
     })
-    const readRuntimeLogSource = Effect.fn("ClawctlRuntimeService.readRuntimeLogSource")(function* (
+    const readRuntimeLogExcerpt = Effect.fn("ClawctlRuntimeService.readRuntimeLogExcerpt")(function* (
       record: InstallRecord,
     ) {
-      const logFile = runtimeLogFile(record.implementation, record.resolvedVersion, record.backend)
-      const exists = yield* withSystemError("runtime.logSourceExists", fs.exists(logFile))
-      if (!exists) {
+      const source = yield* readRuntimeLogText(record)
+      if (source === undefined) {
         return undefined
       }
-      return yield* withSystemError("runtime.readLogSource", fs.readFileString(logFile)).pipe(
-        Effect.catchAll(() => Effect.succeed(undefined)),
-      )
+      return logExcerpt(source)
     })
+    const readRuntimeLogSource = readRuntimeLogText
 
     const runNativeStatus = Effect.fn("ClawctlRuntimeService.runNativeStatus")(function* (
       record: InstallRecord,
@@ -1002,10 +1000,7 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
         yield* requireInteractableImplementation(parsed.implementation, "ensureActiveChatTarget")
       }
       const record = yield* resolveChatTarget(target)
-      const registration = yield* requireInteractableImplementation(
-        record.implementation,
-        "ensureActiveChatTarget",
-      )
+      const registration = yield* requireInteractableImplementation(record.implementation, "ensureActiveChatTarget")
       if (!registration.manifest.capabilities[capability]) {
         const reason = (registration as { messagingUnavailableReason?: string }).messagingUnavailableReason
         const detail = reason ? ` (${reason})` : ""
