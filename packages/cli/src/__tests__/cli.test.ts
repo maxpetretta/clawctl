@@ -135,12 +135,20 @@ fi
   await execFileAsync("chmod", ["755", destination])
 }
 
-async function createTarGz(binaryName: string): Promise<Uint8Array> {
+async function createTarGz(
+  binaryName: string,
+  options?: {
+    nestedRoot?: string
+  },
+): Promise<Uint8Array> {
   const workDir = await mkdtemp(join(tmpdir(), `clawctl-${binaryName}-`))
-  const scriptPath = join(workDir, binaryName)
+  const baseDir = options?.nestedRoot ? join(workDir, options.nestedRoot) : workDir
+  await mkdir(baseDir, { recursive: true })
+  const scriptPath = join(baseDir, binaryName)
   const archivePath = join(workDir, `${binaryName}.tar.gz`)
   await createResponseScript(scriptPath, "plain", binaryName)
-  await execFileAsync("tar", ["-czf", archivePath, "-C", workDir, binaryName])
+  const archiveTarget = options?.nestedRoot ? options.nestedRoot : binaryName
+  await execFileAsync("tar", ["-czf", archivePath, "-C", workDir, archiveTarget])
   const data = await Bun.file(archivePath).bytes()
   await rm(workDir, { recursive: true, force: true })
   return data
@@ -188,7 +196,7 @@ async function createGithubFixtures(): Promise<void> {
     data: await createChecksumFile("zeroclaw-aarch64-apple-darwin.tar.gz", zeroclawArchive, "SHA256SUMS"),
   })
 
-  const ironclawArchive = await createTarGz("ironclaw")
+  const ironclawArchive = await createTarGz("ironclaw", { nestedRoot: "ironclaw-aarch64-apple-darwin" })
   assetMap.set("/downloads/ironclaw/ironclaw-aarch64-apple-darwin.tar.gz", {
     contentType: "application/gzip",
     data: ironclawArchive,
@@ -205,8 +213,15 @@ async function createFakeInstallers(root: string): Promise<void> {
   await mkdir(binDir, { recursive: true })
   await mkdir(join(repoDir, "nanoclaw"), { recursive: true })
   await mkdir(join(repoDir, "bitclaw"), { recursive: true })
+  await mkdir(join(repoDir, "hermes"), { recursive: true })
+  await mkdir(join(repoDir, "hermes", "mini-swe-agent"), { recursive: true })
+  await mkdir(join(repoDir, "hermes", "tinker-atropos"), { recursive: true })
   await writeFile(join(repoDir, "nanoclaw", "README.md"), "# nanoclaw fixture\n", "utf8")
   await writeFile(join(repoDir, "bitclaw", "README.md"), "# bitclaw fixture\n", "utf8")
+  await writeFile(join(repoDir, "hermes", "README.md"), "# hermes fixture\n", "utf8")
+  await writeFile(join(repoDir, "hermes", "package.json"), '{ "name": "hermes-agent-fixture" }\n', "utf8")
+  await writeFile(join(repoDir, "hermes", "mini-swe-agent", "pyproject.toml"), "[project]\nname='mini-swe-agent'\n", "utf8")
+  await writeFile(join(repoDir, "hermes", "tinker-atropos", "pyproject.toml"), "[project]\nname='tinker-atropos'\n", "utf8")
 
   await writeFile(
     fakeNpmPath,
@@ -215,16 +230,19 @@ repo_name=""
 if [ -n "$PWD" ]; then
   repo_name=$(basename "$PWD")
 fi
-if [ "$repo_name" = "repo" ] && [ -f "$PWD/README.md" ]; then
-  case "$(cat "$PWD/README.md")" in
-    *nanoclaw*)
-      repo_name="nanoclaw"
-      ;;
-    *bitclaw*)
-      repo_name="bitclaw"
-      ;;
-  esac
-fi
+  if [ "$repo_name" = "repo" ] && [ -f "$PWD/README.md" ]; then
+    case "$(cat "$PWD/README.md")" in
+      *nanoclaw*)
+        repo_name="nanoclaw"
+        ;;
+      *bitclaw*)
+        repo_name="bitclaw"
+        ;;
+      *hermes*)
+        repo_name="hermes"
+        ;;
+    esac
+  fi
 
 if [ "$1" = "view" ] && [ "$2" = "openclaw" ] && [ "$3" = "version" ] && [ "$4" = "--json" ]; then
   echo '"2026.3.7"'
@@ -237,6 +255,11 @@ if [ "$1" = "view" ] && [ "$2" = "openclaw" ] && [ "$3" = "versions" ] && [ "$4"
 fi
 
 if [ "$1" = "install" ]; then
+  if [ "$repo_name" = "hermes" ] && [ "$2" = "--silent" ]; then
+    mkdir -p "$PWD/node_modules/.bin"
+    exit 0
+  fi
+
   prefix=""
   spec=""
   while [ "$#" -gt 0 ]; do
@@ -272,10 +295,16 @@ if [ "$1" = "install" ]; then
 if [ "$1" = "gateway" ] && [ "$2" = "run" ]; then
   mkdir -p "\${OPENCLAW_STATE_DIR}"
   touch "\${OPENCLAW_STATE_DIR}/ready"
-  trap 'rm -f "\${OPENCLAW_STATE_DIR}/ready"; exit 0' TERM INT
-  while true; do
-    sleep 1
+  port="28789"
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--port" ]; then
+      port="$arg"
+    fi
+    prev="$arg"
   done
+  trap 'rm -f "\${OPENCLAW_STATE_DIR}/ready"; exit 0' TERM INT
+  exec node -e 'const http=require("http"); const fs=require("fs"); const stateDir=process.argv[1]; const port=Number(process.argv[2]); const server=http.createServer((_req,res)=>{ res.statusCode=200; res.end("ok");}); server.listen(port, "127.0.0.1"); const shutdown=()=>{ try{ fs.rmSync(stateDir + "/ready", { force: true }); }catch{} server.close(()=>process.exit(0)); }; process.on("SIGTERM", shutdown); process.on("SIGINT", shutdown);' "\${OPENCLAW_STATE_DIR}" "$port"
 fi
 
 if [ "$1" = "gateway" ] && [ "$2" = "health" ]; then
@@ -411,14 +440,58 @@ exit 1
   await writeFile(
     fakeUvPath,
     `#!/bin/sh
-if [ "$1" = "tool" ] && [ "$2" = "install" ]; then
-  tool_dir=""
+if [ "$1" = "venv" ]; then
+  venv_dir="$2"
+  if [ -z "$venv_dir" ]; then
+    echo "missing venv dir" >&2
+    exit 1
+  fi
+  mkdir -p "$venv_dir/bin"
+  cat > "$venv_dir/bin/python" <<'EOF'
+#!/bin/sh
+if [ "$1" = "-m" ] && [ "$2" = "hermes_cli.main" ]; then
+  shift 2
+  if [ "$1" = "gateway" ] && [ "$2" = "run" ]; then
+    mkdir -p "\${HERMES_HOME}"
+    touch "\${HERMES_HOME}/gateway-ready"
+    trap 'rm -f "\${HERMES_HOME}/gateway-ready"; exit 0' TERM INT
+    while true; do
+      sleep 1
+    done
+  fi
+
+  if [ "$1" = "gateway" ] && [ "$2" = "status" ]; then
+    if [ -f "\${HERMES_HOME}/gateway-ready" ]; then
+      exit 0
+    fi
+    exit 1
+  fi
+fi
+
+if [ "\${1##*/}" = "clawctl-hermes-chat.py" ]; then
+  message="$2"
+  if [ "$message" = "Reply with exactly the single word pong." ]; then
+    echo "pong"
+  else
+    echo "reply:$message"
+  fi
+  exit 0
+fi
+
+exit 0
+EOF
+  chmod 755 "$venv_dir/bin/python"
+  exit 0
+fi
+
+if [ "$1" = "pip" ] && [ "$2" = "install" ]; then
+  python_bin=""
   spec=""
   shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --tool-dir)
-        tool_dir="$2"
+      --python)
+        python_bin="$2"
         shift 2
         ;;
       *)
@@ -428,33 +501,27 @@ if [ "$1" = "tool" ] && [ "$2" = "install" ]; then
     esac
   done
 
-  if [ -z "$tool_dir" ] || [ -z "$spec" ]; then
-    echo "missing tool dir or spec" >&2
+  if [ -z "$python_bin" ] || [ -z "$spec" ]; then
+    echo "missing python bin or spec" >&2
     exit 1
   fi
 
-  mkdir -p "$tool_dir/bin"
+  tool_dir=$(dirname "$python_bin")
 
   case "$spec" in
     nanobot-ai==*)
-      cat > "$tool_dir/bin/nanobot" <<'EOF'
+      cat > "$tool_dir/nanobot" <<'EOF'
 #!/bin/sh
-if [ "$3" = "run" ] || [ "$1" = "run" ]; then
-  listen="127.0.0.1:28080"
-  healthz="/healthz"
+if [ "$1" = "gateway" ]; then
+  port="28080"
   prev=""
   for arg in "$@"; do
-    if [ "$prev" = "--listen-address" ]; then
-      listen="$arg"
-    fi
-    if [ "$prev" = "--healthz-path" ]; then
-      healthz="$arg"
+    if [ "$prev" = "--port" ]; then
+      port="$arg"
     fi
     prev="$arg"
   done
-  host=$(printf "%s" "$listen" | cut -d: -f1)
-  port=$(printf "%s" "$listen" | cut -d: -f2)
-  exec node -e 'const http=require("http"); const host=process.argv[1]; const port=Number(process.argv[2]); const healthz=process.argv[3]; const server=http.createServer((req,res)=>{ if(req.url===healthz){ res.statusCode=200; res.end("ok"); return; } res.statusCode=404; res.end("not found");}); server.listen(port, host); const shutdown=()=>server.close(()=>process.exit(0)); process.on("SIGTERM", shutdown); process.on("SIGINT", shutdown);' "$host" "$port" "$healthz"
+  exec node -e 'setInterval(() => {}, 1000); const shutdown=()=>process.exit(0); process.on("SIGTERM", shutdown); process.on("SIGINT", shutdown);' "$port"
 fi
 
 message=""
@@ -476,7 +543,10 @@ else
   echo "reply:$message"
 fi
 EOF
-      chmod 755 "$tool_dir/bin/nanobot"
+      chmod 755 "$tool_dir/nanobot"
+      exit 0
+      ;;
+    .|".[all]"|./mini-swe-agent|./tinker-atropos)
       exit 0
       ;;
   esac
@@ -517,6 +587,9 @@ if [ "$1" = "clone" ]; then
     https://github.com/NickTikhonov/bitclaw.git)
       source_dir="${repoDir}/bitclaw"
       ;;
+    https://github.com/NousResearch/hermes-agent.git)
+      source_dir="${repoDir}/hermes"
+      ;;
     *)
       echo "unsupported repo: $repo" >&2
       exit 1
@@ -539,6 +612,10 @@ if [ "$1" = "ls-remote" ] && [ "$2" = "--tags" ] && [ "$3" = "--refs" ]; then
 fi
 
 if [ "$1" = "-C" ] && [ "$3" = "checkout" ]; then
+  exit 0
+fi
+
+if [ "$1" = "-C" ] && [ "$3" = "submodule" ] && [ "$4" = "update" ]; then
   exit 0
 fi
 
@@ -603,7 +680,11 @@ async function cleanupRoot(root: string): Promise<void> {
   await rm(root, { recursive: true, force: true })
 }
 
-async function runCli(root: string, args: string[]): Promise<string> {
+function runCli(root: string, args: string[]): Promise<string> {
+  return runCliWithEnv(root, args, {})
+}
+
+async function runCliWithEnv(root: string, args: string[], envOverrides: Record<string, string>): Promise<string> {
   const cliRoot = resolve(import.meta.dir, "../..")
   const { stdout } = await execFileAsync("bun", ["run", "src/index.ts", ...args], {
     cwd: cliRoot,
@@ -616,15 +697,24 @@ async function runCli(root: string, args: string[]): Promise<string> {
       CLAWCTL_GIT_BIN: fakeGitPath,
       CLAWCTL_NPM_BIN: fakeNpmPath,
       CLAWCTL_UV_BIN: fakeUvPath,
+      ...envOverrides,
     },
   })
 
   return stdout.trim()
 }
 
-async function runCliExpectFailure(root: string, args: string[]): Promise<string> {
+function runCliExpectFailure(root: string, args: string[]): Promise<string> {
+  return runCliExpectFailureWithEnv(root, args, {})
+}
+
+async function runCliExpectFailureWithEnv(
+  root: string,
+  args: string[],
+  envOverrides: Record<string, string>,
+): Promise<string> {
   try {
-    await runCli(root, args)
+    await runCliWithEnv(root, args, envOverrides)
   } catch (error) {
     if (!(error instanceof Error && "stderr" in error)) {
       throw error
@@ -898,6 +988,102 @@ describe("tier 1 clawctl cli", () => {
     }
   })
 
+  test.each([
+    ["/bin/zsh", "~/.zshrc"],
+    ["/bin/bash", "~/.bashrc"],
+    ["/opt/homebrew/bin/fish", "~/.config/fish/config.fish"],
+  ])("use prints a shell-specific PATH hint for %s when shims are not on PATH", async (shell, configFile) => {
+    const root = await createTempRoot()
+    try {
+      await seedSharedConfig(root)
+      await runCli(root, ["install", "nullclaw@v2026.3.7"])
+
+      const output = await runCliWithEnv(root, ["use", "nullclaw@v2026.3.7"], {
+        PATH: process.env.PATH ?? "",
+        SHELL: shell,
+      })
+
+      expect(output).toContain("using nullclaw@v2026.3.7")
+      expect(output).toContain(`path hint: ${join(root, "bin")} is not on PATH`)
+      expect(output).toContain(`add this to ${configFile}:`)
+      expect(output).toContain(
+        shell.endsWith("fish") ? `fish_add_path -U ${join(root, "bin")}` : `export PATH="${join(root, "bin")}:$PATH"`,
+      )
+      expect(output).toContain("or run: clawctl init")
+    } finally {
+      await cleanupRoot(root)
+    }
+  })
+
+  test("use warns when an earlier PATH entry shadows the active implementation shim", async () => {
+    const root = await createTempRoot()
+    const shadowDir = join(root, "shadow-bin")
+    try {
+      await seedSharedConfig(root)
+      await mkdir(shadowDir, { recursive: true })
+      await createResponseScript(join(shadowDir, "openclaw"), "plain", "openclaw")
+      await runCli(root, ["install", "openclaw"])
+
+      const output = await runCliWithEnv(root, ["use", "openclaw"], {
+        PATH: `${shadowDir}:${join(root, "bin")}:${process.env.PATH ?? ""}`,
+        SHELL: "/bin/zsh",
+      })
+
+      expect(output).toContain("using openclaw@2026.3.7")
+      expect(output).toContain(`path warning: openclaw resolves to ${join(shadowDir, "openclaw")}`)
+      expect(output).toContain(
+        `move ${join(root, "bin")} earlier on PATH so openclaw uses ${join(root, "bin", "openclaw")}`,
+      )
+      expect(output).toContain("ensure this appears before other PATH setup in ~/.zshrc:")
+      expect(output).toContain(`export PATH="${join(root, "bin")}:$PATH"`)
+    } finally {
+      await cleanupRoot(root)
+    }
+  })
+
+  test("init autodetects the shell and appends a PATH line once", async () => {
+    const root = await createTempRoot()
+    const homeDir = join(root, "home")
+    try {
+      const firstOutput = await runCliWithEnv(root, ["init"], {
+        HOME: homeDir,
+        SHELL: "/bin/zsh",
+      })
+      const secondOutput = await runCliWithEnv(root, ["init"], {
+        HOME: homeDir,
+        SHELL: "/bin/zsh",
+      })
+      const configPath = join(homeDir, ".zshrc")
+      const configText = await Bun.file(configPath).text()
+
+      expect(firstOutput).toContain("init: wrote PATH setup to ~/.zshrc")
+      expect(firstOutput).toContain(`export PATH="${join(root, "bin")}:$PATH"`)
+      expect(secondOutput).toContain("init: already configured in ~/.zshrc")
+      expect(configText).toBe(`export PATH="${join(root, "bin")}:$PATH"\n`)
+    } finally {
+      await cleanupRoot(root)
+    }
+  })
+
+  test("init accepts an explicit fish shell target", async () => {
+    const root = await createTempRoot()
+    const homeDir = join(root, "home")
+    try {
+      const output = await runCliWithEnv(root, ["init", "fish"], {
+        HOME: homeDir,
+        SHELL: "/bin/zsh",
+      })
+      const configPath = join(homeDir, ".config", "fish", "config.fish")
+      const configText = await Bun.file(configPath).text()
+
+      expect(output).toContain("init: wrote PATH setup to ~/.config/fish/config.fish")
+      expect(output).toContain(`fish_add_path -U ${join(root, "bin")}`)
+      expect(configText).toBe(`fish_add_path -U ${join(root, "bin")}\n`)
+    } finally {
+      await cleanupRoot(root)
+    }
+  })
+
   test("use writes active shims and passes telegram config into the active claw", async () => {
     const root = await createTempRoot()
     try {
@@ -1081,6 +1267,7 @@ describe("remote versions", () => {
     ["nullclaw", ["v2026.3.7", "v2026.3.6"]],
     ["openclaw", ["2026.3.7", "2026.3.6"]],
     ["nanobot", ["0.1.4.post4", "0.1.4.post3"]],
+    ["hermes", ["main"]],
     ["nanoclaw", ["main"]],
     ["ironclaw", ["v0.9.0", "v0.8.9"]],
     ["piclaw", ["v0.3.0", "v0.2.9"]],
@@ -1106,69 +1293,99 @@ describe("remote versions", () => {
 })
 
 describe("tier 3 clawctl cli", () => {
-  test("installs and activates experimental bootstrap target nanoclaw with lifecycle-only support", async () => {
+  test("installs and chats with bootstrap-backed hermes", async () => {
     const root = await createTempRoot()
     try {
-      const implementation = "nanoclaw"
-      const version = "main"
-      const installOutput = await runCli(root, ["install", implementation])
-      expect(installOutput).toContain(`installed ${implementation}@${version}`)
+      await seedSharedConfig(root)
 
-      const readmePath = join(root, "installs", "local", implementation, version, "repo", "README.md")
-      expect(await readFile(readmePath, "utf8")).toContain(implementation)
+      const installOutput = await runCli(root, ["install", "hermes"])
+      expect(installOutput).toContain("installed hermes@main")
 
-      const useOutput = await runCli(root, ["use", implementation])
-      expect(useOutput).toContain(`using ${implementation}@${version}`)
+      const useOutput = await runCli(root, ["use", "hermes"])
+      expect(useOutput).toContain("using hermes@main")
 
       const currentOutput = await runCli(root, ["current"])
-      expect(currentOutput).toContain(`${implementation}@${version}`)
+      expect(currentOutput).toContain("hermes@main")
 
-      const statusOutput = await runCli(root, ["status", `${implementation}@${version}`])
-      expect(statusOutput).toContain("supervision: native-daemon")
-      expect(statusOutput).toContain("state: running")
-      expect(statusOutput).toContain("chat: no")
+      const pingOutput = await runCli(root, ["ping", "hermes"])
+      expect(pingOutput).toBe("pong")
 
-      const chatFailure = await runCliExpectFailure(root, ["chat", "hello", implementation])
-      expect(chatFailure).toContain("nanoclaw does not expose a stable local loopback or host-side chat transport yet")
+      const chatOutput = await runCli(root, ["chat", "hello-hermes", "hermes"])
+      expect(chatOutput).toBe("reply:hello-hermes")
 
-      const pingFailure = await runCliExpectFailure(root, ["ping", implementation])
-      expect(pingFailure).toContain("nanoclaw does not expose a stable local loopback or host-side chat transport yet")
-
-      const stopOutput = await runCli(root, ["stop", implementation])
-      expect(stopOutput).toBe(`stopped ${implementation}@${version}`)
-
-      const stoppedOutput = await runCli(root, ["status", `${implementation}@${version}`])
-      expect(stoppedOutput).toContain("state: stopped")
-    } finally {
-      await cleanupRoot(root)
-    }
-  })
-
-  test("installs, activates, and chats with bootstrap-backed bitclaw", async () => {
-    const root = await createTempRoot()
-    try {
-      const implementation = "bitclaw"
-      const version = "main"
-      const installOutput = await runCli(root, ["install", implementation])
-      expect(installOutput).toContain(`installed ${implementation}@${version}`)
-
-      const useOutput = await runCli(root, ["use", implementation])
-      expect(useOutput).toContain(`using ${implementation}@${version}`)
-
-      const statusOutput = await runCli(root, ["status", `${implementation}@${version}`])
+      const statusOutput = await runCli(root, ["status", "hermes@main"])
       expect(statusOutput).toContain("supervision: native-daemon")
       expect(statusOutput).toContain("state: running")
       expect(statusOutput).toContain("chat: yes")
       expect(statusOutput).toContain("ping: yes")
 
-      const pingOutput = await runCli(root, ["ping", implementation])
-      expect(pingOutput).toBe("pong")
+      const envText = await Bun.file(join(root, "runtimes", "local", "hermes", "main", "home", ".env")).text()
+      expect(envText).toContain("OPENAI_BASE_URL=http://127.0.0.1:9999/v1")
+      expect(envText).toContain("OPENAI_API_KEY=test-key")
+      expect(envText).toContain("LLM_MODEL=test-model")
 
-      const chatOutput = await runCli(root, ["chat", "hello-bitclaw", implementation])
-      expect(chatOutput).toBe("reply:hello-bitclaw")
+      const repoReadme = await readFile(join(root, "installs", "local", "hermes", "main", "repo", "README.md"), "utf8")
+      expect(repoReadme).toContain("hermes")
+    } finally {
+      await cleanupRoot(root)
+    }
+  })
 
-      const stopOutput = await runCli(root, ["stop", implementation])
-      expect(stopOutput).toBe(`stopped ${implementation}@${version}`)
+  test.each([
+    ["nanoclaw", "main"],
+    ["bitclaw", "main"],
+    ["ironclaw", "v0.9.0"],
+  ])("install-only local target %s rejects activation and interaction immediately", async (implementation, version) => {
+    const root = await createTempRoot()
+    try {
+      const installOutput = await runCli(root, ["install", implementation])
+      expect(installOutput).toContain(`installed ${implementation}@`)
+
+      const useFailure = await runCliExpectFailure(root, ["use", implementation])
+      expect(useFailure).toContain(`${implementation} is install-only in clawctl; it is not interactable or executable`)
+
+      const chatFailure = await runCliExpectFailure(root, ["chat", "hello", implementation])
+      expect(chatFailure).toContain(
+        `${implementation} is install-only in clawctl; it is not interactable or executable`,
+      )
+
+      const pingFailure = await runCliExpectFailure(root, ["ping", implementation])
+      expect(pingFailure).toContain(
+        `${implementation} is install-only in clawctl; it is not interactable or executable`,
+      )
+
+      const stopFailure = await runCliExpectFailure(root, ["stop", implementation])
+      expect(stopFailure).toContain(
+        `${implementation} is install-only in clawctl; it is not interactable or executable`,
+      )
+
+      const statusOutput = await runCli(root, ["status", `${implementation}@${version}`])
+      expect(statusOutput).toContain("supervision: unmanaged")
+      expect(statusOutput).toContain("state: install-only")
+      expect(statusOutput).toContain("chat: no")
+      expect(statusOutput).toContain("ping: no")
+
+      if (implementation === "nanoclaw" || implementation === "bitclaw") {
+        const readmePath = join(root, "installs", "local", implementation, "main", "repo", "README.md")
+        expect(await readFile(readmePath, "utf8")).toContain(implementation)
+      }
+    } finally {
+      await cleanupRoot(root)
+    }
+  })
+
+  test("install-only piclaw rejects activation and interaction without a local install path", async () => {
+    const root = await createTempRoot()
+    try {
+      for (const command of [
+        ["use", "piclaw"],
+        ["chat", "hello", "piclaw"],
+        ["ping", "piclaw"],
+        ["stop", "piclaw"],
+      ]) {
+        const failure = await runCliExpectFailure(root, command)
+        expect(failure).toContain("piclaw is install-only in clawctl; it is not interactable or executable")
+      }
     } finally {
       await cleanupRoot(root)
     }
@@ -1188,7 +1405,7 @@ describe("tier 3 clawctl cli", () => {
       expect(statusOutput).toContain("chat: no")
 
       const failureOutput = await runCliExpectFailure(root, ["use", "ironclaw"])
-      expect(failureOutput).toContain("implementation cannot be activated yet: ironclaw")
+      expect(failureOutput).toContain("ironclaw is install-only in clawctl; it is not interactable or executable")
     } finally {
       await cleanupRoot(root)
     }

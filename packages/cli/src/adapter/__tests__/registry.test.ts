@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test"
 
-import { getBackendManifest, getRegisteredImplementation, listRegisteredImplementations } from "../registry.ts"
+import {
+  getBackendManifest,
+  getRegisteredImplementation,
+  installOnlyInteractionMessage,
+  isInstallOnlyRegistration,
+  listRegisteredImplementations,
+} from "../registry.ts"
 import type { InstallManifest, RuntimeManifest } from "../schema.ts"
 import { validateAdapterRegistration, validateAdapterRegistry } from "../validate.ts"
 
@@ -27,6 +33,7 @@ describe("adapter registry", () => {
       "zeroclaw",
       "openclaw",
       "nanobot",
+      "hermes",
       "nanoclaw",
       "bitclaw",
       "ironclaw",
@@ -47,6 +54,7 @@ describe("adapter registry", () => {
     const zeroclaw = getRegisteredImplementation("zeroclaw")
     const openclaw = getRegisteredImplementation("openclaw")
     const nanobot = getRegisteredImplementation("nanobot")
+    const hermes = getRegisteredImplementation("hermes")
 
     expect(
       nullclaw.implementationHooks.buildChatCommand({ binaryPath: "/bin/nullclaw", message: "hi", ...runtimeInput }),
@@ -62,19 +70,37 @@ describe("adapter registry", () => {
     ).toContain("--json")
     expect(
       nanobot.implementationHooks.buildChatCommand({ binaryPath: "/bin/nanobot", message: "hi", ...runtimeInput }),
-    ).toEqual(["/bin/nanobot", "--config", "/tmp/home/.nanobot/config.json", "call", "defaults", "hi"])
+    ).toEqual([
+      "/bin/nanobot",
+      "agent",
+      "--config",
+      "/tmp/home/.nanobot/config.json",
+      "--workspace",
+      "/tmp/workspace",
+      "--message",
+      "hi",
+    ])
+    expect(
+      hermes.implementationHooks.buildChatCommand({ binaryPath: "/tmp/install/repo/venv/bin/python", message: "hi", ...runtimeInput }),
+    ).toEqual(["/tmp/install/repo/venv/bin/python", "/tmp/install/clawctl-hermes-chat.py", "hi"])
 
     const nullFiles = await nullclaw.implementationHooks.renderConfig({ config, workspaceDir: "/tmp/workspace" })
     const picoFiles = await picoclaw.implementationHooks.renderConfig({ config, workspaceDir: "/tmp/workspace" })
     const zeroFiles = await zeroclaw.implementationHooks.renderConfig({ config, workspaceDir: "/tmp/workspace" })
     const openFiles = await openclaw.implementationHooks.renderConfig({ config, workspaceDir: "/tmp/workspace" })
     const nanoFiles = await nanobot.implementationHooks.renderConfig({ config, workspaceDir: "/tmp/workspace" })
+    const hermesFiles = await hermes.implementationHooks.renderConfig({ config, workspaceDir: "/tmp/workspace" })
 
     expect(nullFiles[0]?.content).toContain("/tmp/workspace")
     expect(picoFiles[0]?.content).toContain("test-model")
     expect(zeroFiles[0]?.content).toContain("default_model")
     expect(openFiles[0]?.content).toContain("openai-completions")
     expect(nanoFiles[0]?.content).toContain('"provider": "custom"')
+    expect(hermesFiles[0]?.path).toBe(".env")
+    expect(hermesFiles[0]?.content).toContain("OPENAI_BASE_URL=https://example.test/v1")
+    expect(hermesFiles[0]?.content).toContain("OPENAI_API_KEY=secret")
+    expect(hermesFiles[0]?.content).toContain("LLM_MODEL=test-model")
+    expect(hermesFiles[0]?.content).toContain("TERMINAL_CWD=/tmp/workspace")
 
     expect(
       nullclaw.implementationHooks.runtimeEnv({
@@ -123,10 +149,27 @@ describe("adapter registry", () => {
       CLAWCTL_INSTALL_ROOT: "/tmp/install",
       NO_COLOR: "1",
     })
+    expect(
+      hermes.implementationHooks.runtimeEnv({
+        ...runtimeInput,
+      }),
+    ).toEqual({
+      HOME: "/tmp/home",
+      HERMES_HOME: "/tmp/home",
+      CLAWCTL_INSTALL_ROOT: "/tmp/install",
+      TERMINAL_CWD: "/tmp/workspace",
+      MSWEA_GLOBAL_CONFIG_DIR: "/tmp/home",
+      MSWEA_SILENT_STARTUP: "1",
+      HERMES_QUIET: "1",
+      NO_COLOR: "1",
+      CI: "1",
+      PATH: `/tmp/install/repo/venv/bin:/tmp/install/repo/node_modules/.bin:${process.env.PATH ?? ""}`,
+    })
   })
 
   test("supports openclaw output normalization and experimental adapters", () => {
     const openclaw = getRegisteredImplementation("openclaw")
+    const hermes = getRegisteredImplementation("hermes")
     const nanoclaw = getRegisteredImplementation("nanoclaw")
     const bitclaw = getRegisteredImplementation("bitclaw")
     const ironclaw = getRegisteredImplementation("ironclaw")
@@ -152,10 +195,17 @@ describe("adapter registry", () => {
       openclaw.implementationHooks.normalizeChatOutput?.({ stdout: '{"noop":true}', stderr: "bad" }),
     ).toThrow("openclaw did not return chat text: bad")
 
+    expect(hermes.implementationHooks.resolveVersions).toBeDefined()
+    expect(hermes.implementationHooks.install).toBeDefined()
+    expect(hermes.implementationHooks.start).toBeDefined()
+    expect(hermes.implementationHooks.status).toBeDefined()
+    expect(isInstallOnlyRegistration(hermes)).toBe(false)
     expect(nanoclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi", ...runtimeInput })).toEqual(
       [],
     )
     expect(bitclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi", ...runtimeInput })).toEqual([])
+    expect(nanoclaw.implementationHooks.buildShimCommand).toBeUndefined()
+    expect(bitclaw.implementationHooks.buildShimCommand).toBeUndefined()
     expect(ironclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi", ...runtimeInput })).toEqual(
       [],
     )
@@ -170,15 +220,21 @@ describe("adapter registry", () => {
     })
     expect(nanoclaw.implementationHooks.resolveVersions).toBeDefined()
     expect(nanoclaw.implementationHooks.install).toBeDefined()
-    expect(nanoclaw.implementationHooks.start).toBeDefined()
-    expect(nanoclaw.implementationHooks.status).toBeDefined()
-    expect(nanoclaw.messagingUnavailableReason).toContain("stable local loopback")
+    expect(nanoclaw.implementationHooks.start).toBeUndefined()
+    expect(nanoclaw.implementationHooks.status).toBeUndefined()
+    expect(isInstallOnlyRegistration(nanoclaw)).toBe(true)
     expect(bitclaw.implementationHooks.install).toBeDefined()
-    expect(bitclaw.implementationHooks.start).toBeDefined()
-    expect(bitclaw.implementationHooks.status).toBeDefined()
-    expect(bitclaw.implementationHooks.chat).toBeDefined()
-    expect(bitclaw.manifest.capabilities.chat).toBe(true)
-    expect(bitclaw.manifest.capabilities.ping).toBe(true)
+    expect(bitclaw.implementationHooks.start).toBeUndefined()
+    expect(bitclaw.implementationHooks.status).toBeUndefined()
+    expect(bitclaw.implementationHooks.chat).toBeUndefined()
+    expect(bitclaw.manifest.capabilities.chat).toBe(false)
+    expect(bitclaw.manifest.capabilities.ping).toBe(false)
+    expect(isInstallOnlyRegistration(bitclaw)).toBe(true)
+    expect(isInstallOnlyRegistration(ironclaw)).toBe(true)
+    expect(isInstallOnlyRegistration(piclaw)).toBe(true)
+    expect(installOnlyInteractionMessage("bitclaw")).toBe(
+      "bitclaw is install-only in clawctl; it is not interactable or executable",
+    )
     expect(ironclaw.manifest.backends[0]?.install[0]).toMatchObject({
       strategy: "github-release",
       repository: "nearai/ironclaw",

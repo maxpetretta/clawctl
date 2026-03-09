@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
-import { basename, dirname, resolve } from "node:path"
+import { existsSync } from "node:fs"
+import { createConnection } from "node:net"
+import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import type {
@@ -24,6 +25,17 @@ type ImplementationHook = {
     runtimeDir: string
     stateDir: string
     workspaceDir: string
+  }) => string[]
+  buildShimCommand?: (input: {
+    binaryPath: string
+    config: Record<string, string>
+    installRoot: string
+    homeDir: string
+    port?: number
+    runtimeDir: string
+    stateDir: string
+    workspaceDir: string
+    args: ReadonlyArray<string>
   }) => string[]
   chat?: (input: {
     binaryPath: string
@@ -99,6 +111,7 @@ type AdapterRegistration = RegisteredImplementation & {
   messagingUnavailableReason?: string
   hooks: {
     buildChatCommand: true
+    buildShimCommand?: true
     chat?: true
     install?: true
     normalizeChatOutput?: true
@@ -269,114 +282,24 @@ function openclawTelegramCredentialFiles(config: Record<string, string>) {
   ]
 }
 
-function sleep(ms: number): Promise<void> {
+function portAcceptsConnections(port: number, host = "127.0.0.1", timeoutMs = 500): Promise<boolean> {
   return new Promise((resolvePromise) => {
-    setTimeout(resolvePromise, ms)
-  })
-}
-
-function bitclawIpcPaths(homeDir: string) {
-  const ipcDir = resolve(homeDir, "ipc")
-  return {
-    archiveDir: resolve(ipcDir, "archive"),
-    inboundDir: resolve(ipcDir, "inbound"),
-    outboundDir: resolve(ipcDir, "outbound"),
-  }
-}
-
-function listSortedJsonFiles(targetDir: string): string[] {
-  if (!existsSync(targetDir)) {
-    return []
-  }
-  return readdirSync(targetDir)
-    .filter((file) => file.endsWith(".json"))
-    .sort()
-    .map((file) => resolve(targetDir, file))
-}
-
-function archiveBitclawFile(archiveDir: string, filePath: string): void {
-  mkdirSync(archiveDir, { recursive: true })
-  renameSync(filePath, resolve(archiveDir, basename(filePath)))
-}
-
-function writeBitclawInboundMessage(homeDir: string, message: string): void {
-  const { inboundDir } = bitclawIpcPaths(homeDir)
-  mkdirSync(inboundDir, { recursive: true })
-  const unixSeconds = Math.floor(Date.now() / 1000)
-  const rand7 = Math.random().toString(36).slice(2, 9).padEnd(7, "0").slice(0, 7)
-  const fileName = `${unixSeconds}_in_${rand7}.json`
-  const finalPath = resolve(inboundDir, fileName)
-  const tmpPath = `${finalPath}.tmp`
-  writeFileSync(
-    tmpPath,
-    JSON.stringify(
-      {
-        type: "messages",
-        text: message,
-        timestamp: new Date().toISOString(),
-      },
-      null,
-      2,
-    ),
-  )
-  renameSync(tmpPath, finalPath)
-}
-
-function clearBitclawOutbound(homeDir: string): void {
-  const { archiveDir, outboundDir } = bitclawIpcPaths(homeDir)
-  for (const staleFile of listSortedJsonFiles(outboundDir)) {
-    archiveBitclawFile(archiveDir, staleFile)
-  }
-}
-
-function formatBitclawOutbound(event: Record<string, unknown>): string | undefined {
-  if (event.type === "result") {
-    const status = String(event.status ?? "unknown")
-    if (status === "error") {
-      return `[error] ${String(event.error ?? "Unknown error")}`
-    }
-    return String(event.result ?? "").trimEnd()
-  }
-  if (event.type === "message") {
-    return String(event.text ?? "")
-  }
-  return undefined
-}
-
-async function readBitclawResponse(homeDir: string, timeoutMs = 60_000): Promise<string> {
-  const { archiveDir, outboundDir } = bitclawIpcPaths(homeDir)
-  const deadline = Date.now() + timeoutMs
-  let lastMessage: string | undefined
-  while (Date.now() < deadline) {
-    const files = listSortedJsonFiles(outboundDir)
-    if (files.length === 0) {
-      await sleep(200)
-      continue
-    }
-
-    for (const filePath of files) {
-      try {
-        const parsed = JSON.parse(readFileSync(filePath, "utf8")) as Record<string, unknown>
-        const output = formatBitclawOutbound(parsed)
-        archiveBitclawFile(archiveDir, filePath)
-        if (!output) {
-          continue
-        }
-        if (parsed.type === "result") {
-          return output.trim()
-        }
-        lastMessage = output.trim()
-      } catch {
-        archiveBitclawFile(archiveDir, filePath)
+    const socket = createConnection({ host, port })
+    let settled = false
+    const finish = (value: boolean) => {
+      if (settled) {
+        return
       }
+      settled = true
+      socket.destroy()
+      resolvePromise(value)
     }
-    if (lastMessage) {
-      return lastMessage
-    }
-    await sleep(200)
-  }
 
-  throw new Error("timed out waiting for bitclaw response")
+    socket.setTimeout(timeoutMs)
+    socket.once("connect", () => finish(true))
+    socket.once("timeout", () => finish(false))
+    socket.once("error", () => finish(false))
+  })
 }
 
 function makeReleaseBackend(input: BackendManifest["install"][number], runtime: RuntimeManifest): BackendManifest {
@@ -415,6 +338,71 @@ function makeInstallOnlyHooks() {
       runtimeEnv: () => ({}),
     },
   } satisfies Pick<AdapterRegistration, "hooks" | "implementationHooks">
+}
+
+function makeBootstrapInstallOnlyHooks(install: NonNullable<ImplementationHook["install"]>) {
+  const installOnly = makeInstallOnlyHooks()
+  return {
+    hooks: {
+      ...installOnly.hooks,
+      install: true,
+    },
+    implementationHooks: {
+      ...installOnly.implementationHooks,
+      install,
+    },
+  } satisfies Pick<AdapterRegistration, "hooks" | "implementationHooks">
+}
+
+export function isInstallOnlyRegistration(registration: RegisteredImplementation): boolean {
+  return registration.manifest.backends.every(
+    (backend) => !backend.supported || backend.runtime.supervision.kind === "unmanaged",
+  )
+}
+
+export function installOnlyInteractionMessage(implementation: string): string {
+  return `${implementation} is install-only in clawctl; it is not interactable or executable`
+}
+
+function hermesEnvFile(config: Record<string, string>, workspaceDir: string): string {
+  const telegram = resolveTelegramSettings(config)
+  return [
+    `OPENAI_BASE_URL=${config.CLAW_BASE_URL}`,
+    `OPENAI_API_KEY=${config.CLAW_API_KEY}`,
+    `LLM_MODEL=${config.CLAW_MODEL}`,
+    `OPENAI_MODEL=${config.CLAW_MODEL}`,
+    `TERMINAL_CWD=${workspaceDir}`,
+    ...(telegram.enabled ? [`TELEGRAM_BOT_TOKEN=${telegram.token}`] : []),
+    ...(telegram.username ? [`TELEGRAM_BOT_USERNAME=${telegram.username}`] : []),
+    ...(telegram.chatId ? [`TELEGRAM_CHAT_ID=${telegram.chatId}`] : []),
+    ...(telegram.identities.length > 0 ? [`TELEGRAM_ALLOWED_FROM=${telegram.identities.join(",")}`] : []),
+    "",
+  ].join("\n")
+}
+
+function hermesRuntimeEnv(input: {
+  homeDir: string
+  installRoot: string
+  workspaceDir: string
+}): NodeJS.ProcessEnv {
+  return {
+    HOME: input.homeDir,
+    HERMES_HOME: input.homeDir,
+    CLAWCTL_INSTALL_ROOT: input.installRoot,
+    TERMINAL_CWD: input.workspaceDir,
+    MSWEA_GLOBAL_CONFIG_DIR: input.homeDir,
+    MSWEA_SILENT_STARTUP: "1",
+    HERMES_QUIET: "1",
+    NO_COLOR: "1",
+    CI: "1",
+    PATH: [
+      resolve(input.installRoot, "repo", "venv", "bin"),
+      resolve(input.installRoot, "repo", "node_modules", ".bin"),
+      process.env.PATH ?? "",
+    ]
+      .filter((entry) => entry.length > 0)
+      .join(":"),
+  }
 }
 
 function makeReleaseInstallOnlyRegistration(input: {
@@ -887,24 +875,11 @@ const openclawRegistration = {
         port,
       })
     },
-    status: async ({ binaryPath, homeDir, port, stateDir }) => {
+    status: async ({ port }) => {
       if (port === undefined) {
         return false
       }
-      const child = Bun.spawn(
-        [binaryPath, "gateway", "health", "--url", `ws://127.0.0.1:${port}`, "--json", "--no-color"],
-        {
-          env: {
-            ...process.env,
-            HOME: homeDir,
-            OPENCLAW_STATE_DIR: stateDir,
-          },
-          stderr: "ignore",
-          stdout: "pipe",
-        },
-      )
-      const exitCode = await child.exited
-      return exitCode === 0
+      return await portAcceptsConnections(port)
     },
   },
 } satisfies AdapterRegistration
@@ -953,12 +928,14 @@ const nanobotRegistration = {
     runtimeEnv: true,
   },
   implementationHooks: {
-    buildChatCommand: ({ binaryPath, homeDir, message }) => [
+    buildChatCommand: ({ binaryPath, homeDir, message, workspaceDir }) => [
       binaryPath,
+      "agent",
       "--config",
       resolve(homeDir, ".nanobot", "config.json"),
-      "call",
-      "defaults",
+      "--workspace",
+      workspaceDir,
+      "--message",
       message,
     ],
     renderConfig: async ({ config, workspaceDir }) => [
@@ -975,21 +952,18 @@ const nanobotRegistration = {
       CLAWCTL_INSTALL_ROOT: installRoot,
       NO_COLOR: "1",
     }),
-    start: ({ binaryPath, homeDir, installRoot }) => {
+    start: ({ binaryPath, homeDir, installRoot, workspaceDir }) => {
       const port = 28080
       return Promise.resolve({
         command: binaryPath,
         args: [
+          "gateway",
           "--config",
           resolve(homeDir, ".nanobot", "config.json"),
-          "run",
-          "--listen-address",
-          `127.0.0.1:${port}`,
-          "--disable-ui",
-          "--healthz-path",
-          "/healthz",
-          "--agent",
-          "defaults",
+          "--workspace",
+          workspaceDir,
+          "--port",
+          `${port}`,
         ],
         env: {
           HOME: homeDir,
@@ -1000,35 +974,30 @@ const nanobotRegistration = {
       })
     },
     status: async ({ port }) => {
-      if (port === undefined) {
-        return false
-      }
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}/healthz`)
-        return response.ok
-      } catch {
-        return false
-      }
+      return port !== undefined
     },
   },
 } satisfies AdapterRegistration
 
-const nanoclawRegistration = {
-  messagingUnavailableReason:
-    "nanoclaw does not expose a stable local loopback or host-side chat transport yet; only lifecycle control is available",
+const hermesRegistration = {
   manifest: {
-    id: "nanoclaw",
-    displayName: "NanoClaw",
+    id: "hermes",
+    displayName: "Hermes",
     supportTier: "tier3",
-    description: "Bootstrap-heavy local install with native daemon supervision",
-    repository: "https://github.com/qwibitai/nanoclaw",
-    docsUrl: "https://github.com/qwibitai/nanoclaw",
+    description: "Bootstrap-heavy local adapter with native gateway supervision",
+    repository: "https://github.com/NousResearch/hermes-agent",
+    docsUrl: "https://hermes-agent.nousresearch.com/docs/",
     capabilities: makeCapabilities({
-      chat: false,
-      ping: false,
       telegram: true,
     }),
-    config: makeConfig([], []),
+    config: makeConfig([
+      {
+        path: ".env",
+        format: "env",
+        template: { kind: "inline", value: "" },
+        requiredKeys: [...sharedKeys],
+      },
+    ]),
     backends: [
       {
         kind: "local",
@@ -1037,7 +1006,7 @@ const nanoclawRegistration = {
           {
             strategy: "repo-bootstrap",
             priority: 1,
-            repository: "https://github.com/qwibitai/nanoclaw.git",
+            repository: "https://github.com/NousResearch/hermes-agent.git",
             refPolicy: "branch",
             bootstrapHook: "install",
             versionSource: { kind: "adapter-hook", hook: "resolveVersions" },
@@ -1058,8 +1027,191 @@ const nanoclawRegistration = {
     runtimeEnv: true,
   },
   implementationHooks: {
-    buildChatCommand: () => [],
+    buildChatCommand: ({ binaryPath, installRoot, message }) => [
+      binaryPath,
+      resolve(installRoot, "clawctl-hermes-chat.py"),
+      message,
+    ],
     install: async ({ installRoot }) => {
+      const repoDir = resolve(installRoot, "repo")
+      const git = process.env.CLAWCTL_GIT_BIN ?? "git"
+      const uv = process.env.CLAWCTL_UV_BIN ?? "uv"
+      const npm = process.env.CLAWCTL_NPM_BIN ?? "npm"
+      const pythonBin = resolve(repoDir, "venv", "bin", "python")
+      const chatHelper = resolve(installRoot, "clawctl-hermes-chat.py")
+
+      const runCommand = async (
+        command: string[],
+        options: {
+          allowFailure?: boolean
+          cwd?: string
+          failureMessage: string
+        },
+      ) => {
+        const child = Bun.spawn(command, {
+          ...(options.cwd ? { cwd: options.cwd } : {}),
+          env: process.env,
+          stderr: "inherit",
+          stdout: "inherit",
+        })
+        const exitCode = await child.exited
+        if (exitCode !== 0 && options.allowFailure !== true) {
+          throw new Error(options.failureMessage)
+        }
+      }
+
+      await runCommand([git, "-C", repoDir, "submodule", "update", "--init", "--recursive"], {
+        cwd: repoDir,
+        failureMessage: "hermes bootstrap failed during git submodule update",
+      })
+      await runCommand([uv, "venv", "venv", "--python", "3.11"], {
+        cwd: repoDir,
+        failureMessage: "hermes bootstrap failed during uv venv",
+      })
+
+      try {
+        await runCommand([uv, "pip", "install", "--python", pythonBin, "-e", ".[all]"], {
+          cwd: repoDir,
+          failureMessage: "hermes bootstrap failed during uv pip install -e .[all]",
+        })
+      } catch {
+        await runCommand([uv, "pip", "install", "--python", pythonBin, "-e", "."], {
+          cwd: repoDir,
+          failureMessage: "hermes bootstrap failed during uv pip install -e .",
+        })
+      }
+
+      for (const submoduleDir of ["mini-swe-agent", "tinker-atropos"]) {
+        if (existsSync(resolve(repoDir, submoduleDir, "pyproject.toml"))) {
+          await runCommand([uv, "pip", "install", "--python", pythonBin, "-e", `./${submoduleDir}`], {
+            cwd: repoDir,
+            allowFailure: true,
+            failureMessage: `hermes optional submodule install failed: ${submoduleDir}`,
+          })
+        }
+      }
+
+      if (existsSync(resolve(repoDir, "package.json"))) {
+        await runCommand([npm, "install", "--silent"], {
+          cwd: repoDir,
+          allowFailure: true,
+          failureMessage: "hermes optional npm install failed",
+        })
+      }
+
+      await Bun.write(
+        chatHelper,
+        `from pathlib import Path
+import sys
+
+project_root = Path(__file__).resolve().parent / "repo"
+sys.path.insert(0, str(project_root))
+
+from cli import HermesCLI
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print("usage: clawctl-hermes-chat.py <message>", file=sys.stderr)
+        return 1
+
+    cli = HermesCLI(compact=True, verbose=False)
+    if not cli._init_agent():
+        return 1
+
+    response = cli.agent.chat(sys.argv[1])
+    if not response:
+        return 1
+
+    print(response)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+`,
+      )
+
+      return {
+        entrypointCommand: [pythonBin, "-m", "hermes_cli.main"],
+      }
+    },
+    resolveVersions: async () => ["main"],
+    renderConfig: async ({ config, workspaceDir }) => [
+      {
+        path: ".env",
+        content: hermesEnvFile(config, workspaceDir),
+      },
+    ],
+    runtimeEnv: ({ homeDir, installRoot, workspaceDir }) =>
+      hermesRuntimeEnv({
+        homeDir,
+        installRoot,
+        workspaceDir,
+      }),
+    start: ({ binaryPath, homeDir, installRoot, workspaceDir }) =>
+      Promise.resolve({
+        command: binaryPath,
+        args: ["-m", "hermes_cli.main", "gateway", "run", "--replace"],
+        env: hermesRuntimeEnv({
+          homeDir,
+          installRoot,
+          workspaceDir,
+        }),
+      }),
+    status: async ({ binaryPath, homeDir, installRoot, workspaceDir }) => {
+      const child = Bun.spawn([binaryPath, "-m", "hermes_cli.main", "gateway", "status"], {
+        env: {
+          ...process.env,
+          ...hermesRuntimeEnv({
+            homeDir,
+            installRoot,
+            workspaceDir,
+          }),
+        },
+        stderr: "ignore",
+        stdout: "ignore",
+      })
+      return (await child.exited) === 0
+    },
+  },
+} satisfies AdapterRegistration
+
+const nanoclawRegistration = {
+  manifest: {
+    id: "nanoclaw",
+    displayName: "NanoClaw",
+    supportTier: "tier3",
+    description: "Bootstrap-heavy local install target",
+    repository: "https://github.com/qwibitai/nanoclaw",
+    docsUrl: "https://github.com/qwibitai/nanoclaw",
+    capabilities: makeCapabilities({
+      chat: false,
+      ping: false,
+      telegram: true,
+      daemon: true,
+    }),
+    config: makeConfig([], []),
+    backends: [
+      {
+        kind: "local",
+        supported: true,
+        install: [
+          {
+            strategy: "repo-bootstrap",
+            priority: 1,
+            repository: "https://github.com/qwibitai/nanoclaw.git",
+            refPolicy: "branch",
+            bootstrapHook: "install",
+            versionSource: { kind: "adapter-hook", hook: "resolveVersions" },
+            supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
+          },
+        ],
+        runtime: makeUnmanagedRuntime(),
+      },
+    ],
+  } satisfies ImplementationManifest,
+  ...makeBootstrapInstallOnlyHooks(async ({ installRoot }) => {
       const repoDir = resolve(installRoot, "repo")
       const install = Bun.spawn([process.env.CLAWCTL_NPM_BIN ?? "npm", "ci"], {
         cwd: repoDir,
@@ -1082,46 +1234,7 @@ const nanoclawRegistration = {
       return {
         entrypointCommand: ["node", resolve(repoDir, "dist", "index.js")],
       }
-    },
-    resolveVersions: async () => ["main"],
-    renderConfig: async () => [],
-    runtimeEnv: ({ config, homeDir, installRoot }) => {
-      const telegram = resolveTelegramSettings(config)
-      return {
-        HOME: homeDir,
-        CLAWCTL_INSTALL_ROOT: installRoot,
-        NO_COLOR: "1",
-        CI: "1",
-        ...(telegram.enabled ? { TELEGRAM_BOT_TOKEN: telegram.token } : {}),
-        ...(telegram.username ? { TELEGRAM_BOT_USERNAME: telegram.username } : {}),
-        ...(telegram.chatId ? { TELEGRAM_CHAT_ID: telegram.chatId } : {}),
-        ...(telegram.identities.length > 0 ? { TELEGRAM_ALLOWED_FROM: telegram.identities.join(",") } : {}),
-      }
-    },
-    start: ({ config, installRoot, homeDir, runtimeDir, stateDir, workspaceDir }) => {
-      const telegram = resolveTelegramSettings(config)
-      return Promise.resolve({
-        command: "node",
-        args: [resolve(installRoot, "repo", "dist", "index.js")],
-        env: {
-          HOME: homeDir,
-          CLAWCTL_INSTALL_ROOT: installRoot,
-          CLAWCTL_RUNTIME_DIR: runtimeDir,
-          CLAWCTL_STATE_DIR: stateDir,
-          CLAWCTL_WORKSPACE_DIR: workspaceDir,
-          NO_COLOR: "1",
-          CI: "1",
-          ...(telegram.enabled ? { TELEGRAM_BOT_TOKEN: telegram.token } : {}),
-          ...(telegram.username ? { TELEGRAM_BOT_USERNAME: telegram.username } : {}),
-          ...(telegram.chatId ? { TELEGRAM_CHAT_ID: telegram.chatId } : {}),
-          ...(telegram.identities.length > 0 ? { TELEGRAM_ALLOWED_FROM: telegram.identities.join(",") } : {}),
-        },
-      })
-    },
-    status: ({ installRoot }) => {
-      return Promise.resolve(existsSync(resolve(installRoot, "repo", "data", "ipc")))
-    },
-  },
+    }),
 } satisfies AdapterRegistration
 
 const bitclawRegistration = {
@@ -1129,11 +1242,14 @@ const bitclawRegistration = {
     id: "bitclaw",
     displayName: "BitClaw",
     supportTier: "tier3",
-    description: "Bootstrap-heavy local install with native daemon supervision",
+    description: "Bootstrap-heavy local install target",
     repository: "https://github.com/NickTikhonov/bitclaw",
     docsUrl: "https://github.com/NickTikhonov/bitclaw",
     capabilities: makeCapabilities({
+      chat: false,
+      ping: false,
       telegram: true,
+      daemon: true,
     }),
     config: makeConfig([], []),
     backends: [
@@ -1151,23 +1267,11 @@ const bitclawRegistration = {
             supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
           },
         ],
-        runtime: makeNativeDaemonRuntime(),
+        runtime: makeUnmanagedRuntime(),
       },
     ],
   } satisfies ImplementationManifest,
-  hooks: {
-    buildChatCommand: true,
-    chat: true,
-    install: true,
-    resolveVersions: true,
-    renderConfig: true,
-    start: true,
-    status: true,
-    runtimeEnv: true,
-  },
-  implementationHooks: {
-    buildChatCommand: () => [],
-    install: async ({ installRoot }) => {
+  ...makeBootstrapInstallOnlyHooks(async ({ installRoot }) => {
       const repoDir = resolve(installRoot, "repo")
       const install = Bun.spawn([process.env.CLAWCTL_NPM_BIN ?? "npm", "ci"], {
         cwd: repoDir,
@@ -1207,57 +1311,7 @@ setInterval(() => {}, 1000);
           resolve(repoDir, "clawctl-daemon.ts"),
         ],
       }
-    },
-    resolveVersions: async () => ["main"],
-    renderConfig: async () => [],
-    chat: ({ homeDir, message }) => {
-      clearBitclawOutbound(homeDir)
-      writeBitclawInboundMessage(homeDir, message)
-      return readBitclawResponse(homeDir)
-    },
-    runtimeEnv: ({ config, homeDir, installRoot }) => {
-      const telegram = resolveTelegramSettings(config)
-      return {
-        HOME: homeDir,
-        BITCLAW_HOME: homeDir,
-        CLAWCTL_INSTALL_ROOT: installRoot,
-        NO_COLOR: "1",
-        CI: "1",
-        ...(telegram.enabled ? { TELEGRAM_BOT_TOKEN: telegram.token } : {}),
-        ...(telegram.chatId ? { TELEGRAM_CHAT_ID: telegram.chatId } : {}),
-      }
-    },
-    start: ({ config, installRoot, homeDir, runtimeDir, stateDir, workspaceDir }) =>
-      Promise.resolve({
-        command: "node",
-        args: [
-          resolve(installRoot, "repo", "node_modules", "tsx", "dist", "cli.mjs"),
-          resolve(installRoot, "repo", "clawctl-daemon.ts"),
-        ],
-        env: {
-          HOME: homeDir,
-          BITCLAW_HOME: homeDir,
-          CLAWCTL_INSTALL_ROOT: installRoot,
-          CLAWCTL_RUNTIME_DIR: runtimeDir,
-          CLAWCTL_STATE_DIR: stateDir,
-          CLAWCTL_WORKSPACE_DIR: workspaceDir,
-          NO_COLOR: "1",
-          CI: "1",
-          ...(resolveTelegramSettings(config).enabled
-            ? { TELEGRAM_BOT_TOKEN: resolveTelegramSettings(config).token }
-            : {}),
-          ...(resolveTelegramSettings(config).chatId
-            ? { TELEGRAM_CHAT_ID: resolveTelegramSettings(config).chatId }
-            : {}),
-        },
-      }),
-    status: ({ homeDir }) => {
-      const ipcDir = resolve(homeDir, "ipc")
-      const inboundDir = resolve(ipcDir, "inbound")
-      const outboundDir = resolve(ipcDir, "outbound")
-      return Promise.resolve(existsSync(inboundDir) && existsSync(outboundDir))
-    },
-  },
+    }),
 } satisfies AdapterRegistration
 
 const ironclawRegistration = makeReleaseInstallOnlyRegistration({
@@ -1267,7 +1321,7 @@ const ironclawRegistration = makeReleaseInstallOnlyRegistration({
   repository: "nearai/ironclaw",
   docsUrl: "https://github.com/nearai/ironclaw",
   assetPattern: "ironclaw-aarch64-apple-darwin.tar.gz",
-  assetArchive: { kind: "tar.gz", binaryPath: "ironclaw" },
+  assetArchive: { kind: "tar.gz", binaryPath: "ironclaw-aarch64-apple-darwin/ironclaw" },
 })
 
 const piclawRegistration = {
@@ -1319,6 +1373,7 @@ export const adapterRegistrations = [
   zeroclawRegistration,
   openclawRegistration,
   nanobotRegistration,
+  hermesRegistration,
   nanoclawRegistration,
   bitclawRegistration,
   ironclawRegistration,

@@ -1,6 +1,8 @@
 import { BunContext } from "@effect/platform-bun"
+import * as FetchHttpClient from "@effect/platform/FetchHttpClient"
 import { Effect, Layer } from "effect"
 
+import { ClawctlInstallerLive } from "./installer-service.ts"
 import { ClawctlMaintenanceLive } from "./maintenance-service.ts"
 import { makeClawctlPathsLayer } from "./paths-service.ts"
 import { ClawctlRuntimeLive } from "./runtime-service.ts"
@@ -9,7 +11,7 @@ import { ClawctlStoreLive } from "./store-service.ts"
 function makeBaseLayer(rootDir: string) {
   const platformLayer = BunContext.layer
   const pathsLayer = makeClawctlPathsLayer(rootDir).pipe(Layer.provide(platformLayer))
-  return Layer.mergeAll(platformLayer, pathsLayer)
+  return Layer.mergeAll(platformLayer, FetchHttpClient.layer, pathsLayer)
 }
 
 function makeStoreLayer(rootDir: string) {
@@ -22,6 +24,12 @@ function makeRuntimeLayer(rootDir: string) {
   const storeLayer = makeStoreLayer(rootDir)
   const runtimeLayer = ClawctlRuntimeLive.pipe(Layer.provide(storeLayer))
   return Layer.mergeAll(storeLayer, runtimeLayer)
+}
+
+function makeInstallerLayer(rootDir: string) {
+  const storeLayer = makeStoreLayer(rootDir)
+  const installerLayer = ClawctlInstallerLive.pipe(Layer.provide(storeLayer))
+  return Layer.mergeAll(storeLayer, installerLayer)
 }
 
 export function makeMaintenanceLayer(rootDir: string) {
@@ -40,6 +48,10 @@ export function makeStoreTestLayer(rootDir: string) {
 
 export function makeRuntimeTestLayer(rootDir: string) {
   return makeRuntimeLayer(rootDir)
+}
+
+export function makeInstallerTestLayer(rootDir: string) {
+  return makeInstallerLayer(rootDir)
 }
 
 export function runWithLayer<A, E, R>(effect: Effect.Effect<A, E, R>, layer: Layer.Layer<R>) {

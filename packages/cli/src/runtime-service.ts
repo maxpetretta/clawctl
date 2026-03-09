@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
 import { closeSync, existsSync, openSync } from "node:fs"
-import { dirname, resolve } from "node:path"
+import { basename, dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import * as Command from "@effect/platform/Command"
@@ -9,7 +9,12 @@ import * as FileSystem from "@effect/platform/FileSystem"
 import { BunContext } from "@effect/platform-bun"
 import { Context, Effect, Layer, type Option } from "effect"
 
-import { getRegisteredImplementation } from "./adapter/registry.ts"
+import {
+  getRegisteredImplementation,
+  installOnlyInteractionMessage,
+  isInstallOnlyRegistration,
+} from "./adapter/registry.ts"
+import { repairPythonScriptShebang } from "./installer-service.ts"
 import type { RuntimeManifest } from "./adapter/schema.ts"
 import type { InstallRecord, RegisteredImplementation, RuntimeRecord } from "./adapter/types.ts"
 import { type ClawctlError, userError, withSystemError } from "./errors.ts"
@@ -116,6 +121,38 @@ function shellQuote(argument: string): string {
   return `'${argument.replaceAll("'", `'\\''`)}'`
 }
 
+function logExcerpt(source: string): string | undefined {
+  const lines = source
+    .split(/\r?\n/u)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0)
+  if (lines.length === 0) {
+    return undefined
+  }
+  return lines.slice(-8).join("\n")
+}
+
+export function startupFailureMessage(
+  implementation: string,
+  detail: string,
+  options?: {
+    excerpt?: string
+    logSource?: string
+  },
+): string {
+  if (implementation === "nanoclaw" && options?.logSource?.includes("No channels connected")) {
+    return "failed starting runtime for nanoclaw: stock nanoclaw has no channels configured; install a customized fork with a channel skill such as /add-telegram before using it through clawctl"
+  }
+  if (implementation === "nanoclaw" && options?.logSource?.includes("ERR_DLOPEN_FAILED")) {
+    return options?.excerpt
+      ? `failed starting runtime for nanoclaw: native module load failed; reinstall nanoclaw so its dependencies are rebuilt against your current Node.js version (try: clawctl uninstall --all nanoclaw && clawctl install nanoclaw)\n${options.excerpt}`
+      : "failed starting runtime for nanoclaw: native module load failed; reinstall nanoclaw so its dependencies are rebuilt against your current Node.js version (try: clawctl uninstall --all nanoclaw && clawctl install nanoclaw)"
+  }
+  return options?.excerpt
+    ? `failed starting runtime for ${implementation}: ${detail}\n${options.excerpt}`
+    : `failed starting runtime for ${implementation}: ${detail}`
+}
+
 type ResolvedRuntime = {
   readonly registration: RegisteredImplementation & {
     messagingUnavailableReason?: string
@@ -130,6 +167,17 @@ type ResolvedRuntime = {
         runtimeDir: string
         stateDir: string
         workspaceDir: string
+      }) => string[]
+      buildShimCommand?: (input: {
+        binaryPath: string
+        config: Record<string, string>
+        installRoot: string
+        homeDir: string
+        port?: number
+        runtimeDir: string
+        stateDir: string
+        workspaceDir: string
+        args: ReadonlyArray<string>
       }) => string[]
       chat?: (input: {
         binaryPath: string
@@ -228,6 +276,15 @@ export const ClawctlRuntimeLive = Layer.effect(
           userError("runtime.parseTargetReference", cause instanceof Error ? cause.message : String(cause)),
       })
     })
+    const requireInteractableImplementation = Effect.fn("ClawctlRuntimeService.requireInteractableImplementation")(
+      function* (implementation: string, action: string) {
+        const registration = yield* resolveRegistration(implementation)
+        if (isInstallOnlyRegistration(registration)) {
+          return yield* userError(`runtime.${action}`, installOnlyInteractionMessage(implementation))
+        }
+        return registration
+      },
+    )
     const resolveRuntime = Effect.fn("ClawctlRuntimeService.resolveRuntime")(function* (record: InstallRecord) {
       const registration = yield* resolveRegistration(record.implementation)
       const runtime = registration.manifest.backends.find((backend) => backend.kind === record.backend)?.runtime
@@ -368,6 +425,31 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
 
       yield* withSystemError("runtime.makeRuntimeDir", fs.makeDirectory(runtimeDir, { recursive: true }))
     })
+    const readRuntimeLogExcerpt = Effect.fn("ClawctlRuntimeService.readRuntimeLogExcerpt")(function* (
+      record: InstallRecord,
+    ) {
+      const logFile = runtimeLogFile(record.implementation, record.resolvedVersion, record.backend)
+      const exists = yield* withSystemError("runtime.logExists", fs.exists(logFile))
+      if (!exists) {
+        return undefined
+      }
+      const source = yield* withSystemError("runtime.readLog", fs.readFileString(logFile)).pipe(
+        Effect.catchAll(() => Effect.succeed("")),
+      )
+      return logExcerpt(source)
+    })
+    const readRuntimeLogSource = Effect.fn("ClawctlRuntimeService.readRuntimeLogSource")(function* (
+      record: InstallRecord,
+    ) {
+      const logFile = runtimeLogFile(record.implementation, record.resolvedVersion, record.backend)
+      const exists = yield* withSystemError("runtime.logSourceExists", fs.exists(logFile))
+      if (!exists) {
+        return undefined
+      }
+      return yield* withSystemError("runtime.readLogSource", fs.readFileString(logFile)).pipe(
+        Effect.catchAll(() => Effect.void),
+      )
+    })
 
     const runNativeStatus = Effect.fn("ClawctlRuntimeService.runNativeStatus")(function* (
       record: InstallRecord,
@@ -431,6 +513,35 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
       const existing = yield* store.readRuntimeRecord(record.implementation, record.resolvedVersion, record.backend)
       const base = existing ?? (yield* buildRuntimeRecord(record, {}))
       yield* store.writeRuntimeRecord(normalizeRuntimeRecord(base, next))
+    })
+
+    const repairPythonEntrypoints = Effect.fn("ClawctlRuntimeService.repairPythonEntrypoints")(function* (
+      record: InstallRecord,
+    ) {
+      if (record.installStrategy !== "python-package") {
+        return
+      }
+      const [entrypoint] = record.entrypointCommand
+      if (!entrypoint) {
+        return
+      }
+
+      const entrypointName = basename(entrypoint)
+      const installedInterpreterDir = path.resolve(record.installRoot, "venv", "bin")
+      const scriptPaths = [path.resolve(record.installRoot, "venv", "bin", entrypointName), entrypoint]
+
+      for (const scriptPath of scriptPaths) {
+        const exists = yield* withSystemError("runtime.statPythonEntrypoint", fs.exists(scriptPath))
+        if (!exists) {
+          continue
+        }
+        const source = yield* withSystemError("runtime.readPythonEntrypoint", fs.readFileString(scriptPath))
+        const repaired = repairPythonScriptShebang(source, installedInterpreterDir)
+        if (repaired !== source) {
+          yield* withSystemError("runtime.writePythonEntrypoint", fs.writeFileString(scriptPath, repaired))
+          yield* withSystemError("runtime.chmodPythonEntrypoint", fs.chmod(scriptPath, 0o755))
+        }
+      }
     })
 
     const readHealthyRuntimeRecord = Effect.fn("ClawctlRuntimeService.readHealthyRuntimeRecord")(function* (
@@ -699,6 +810,19 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
           if (runtimeRecord?.state === "running") {
             return runtimeRecord
           }
+          if (runtimeRecord?.state === "stopped" || runtimeRecord?.state === "failed") {
+            const detail = runtimeRecord.lastError ?? `runtime ${runtimeRecord.state}`
+            const logSource = yield* readRuntimeLogSource(record)
+            const excerpt = yield* readRuntimeLogExcerpt(record)
+            const messageOptions = {
+              ...(excerpt ? { excerpt } : {}),
+              ...(logSource ? { logSource } : {}),
+            }
+            return yield* userError(
+              "runtime.spawnNativeDaemonRuntime",
+              startupFailureMessage(record.implementation, detail, messageOptions),
+            )
+          }
           if (remaining <= 0) {
             return yield* userError(
               "runtime.spawnNativeDaemonRuntime",
@@ -715,6 +839,7 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
     const spawnManagedRuntime = Effect.fn("ClawctlRuntimeService.spawnManagedRuntime")(function* (
       record: InstallRecord,
     ) {
+      yield* repairPythonEntrypoints(record)
       const { registration, runtime } = yield* resolveRuntime(record)
       if (runtime.supervision.kind === "native-daemon") {
         return yield* spawnNativeDaemonRuntime(record, registration)
@@ -779,6 +904,19 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
           if (runtimeRecord?.state === "running" && runtimeRecord.port !== undefined) {
             return runtimeRecord
           }
+          if (runtimeRecord?.state === "stopped" || runtimeRecord?.state === "failed") {
+            const detail = runtimeRecord.lastError ?? `runtime ${runtimeRecord.state}`
+            const logSource = yield* readRuntimeLogSource(record)
+            const excerpt = yield* readRuntimeLogExcerpt(record)
+            const messageOptions = {
+              ...(excerpt ? { excerpt } : {}),
+              ...(logSource ? { logSource } : {}),
+            }
+            return yield* userError(
+              "runtime.spawnManagedRuntime",
+              startupFailureMessage(record.implementation, detail, messageOptions),
+            )
+          }
           if (remaining <= 0) {
             return yield* userError(
               "runtime.spawnManagedRuntime",
@@ -839,6 +977,7 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
     })
 
     const activateSelection = Effect.fn("ClawctlRuntimeService.activateSelection")(function* (target: TargetReference) {
+      yield* requireInteractableImplementation(target.implementation, "activateSelection")
       const record = yield* store.resolveInstalledRecord(target.implementation, target.version)
       const current = yield* store.readCurrentSelection
       const previousImplementation = current?.implementation
@@ -881,8 +1020,15 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
       target: Option.Option<string>,
       capability: "chat" | "ping" = "chat",
     ) {
+      if (target._tag === "Some") {
+        const parsed = yield* parseReference(target.value)
+        yield* requireInteractableImplementation(parsed.implementation, "ensureActiveChatTarget")
+      }
       const record = yield* resolveChatTarget(target)
-      const registration = yield* resolveRegistration(record.implementation)
+      const registration = yield* requireInteractableImplementation(
+        record.implementation,
+        "ensureActiveChatTarget",
+      )
       if (!registration.manifest.capabilities[capability]) {
         const detail = registration.messagingUnavailableReason ? ` (${registration.messagingUnavailableReason})` : ""
         return yield* userError(
@@ -929,7 +1075,11 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
       }
 
       const record = yield* store.resolveInstalledRecord(current.implementation, current.version)
+      yield* repairPythonEntrypoints(record)
       const { registration } = yield* resolveRuntime(record)
+      if (isInstallOnlyRegistration(registration)) {
+        return yield* userError("runtime.runShimmedCommand", installOnlyInteractionMessage(record.implementation))
+      }
       const configEntries = yield* resolveSharedConfigEntries()
       const runtimeRecord = yield* readHealthyRuntimeRecord(record)
       const homeDir = runtimeHomeDir(record.implementation, record.resolvedVersion)
@@ -957,9 +1107,25 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
         CLAWCTL_ROOT: paths.rootDir,
       }
 
-      const [file, ...fixedArgs] = record.entrypointCommand
+      const command =
+        registration.implementationHooks.buildShimCommand?.({
+          binaryPath: record.entrypointCommand[0] ?? "",
+          config: configEntries,
+          homeDir,
+          installRoot: record.installRoot,
+          runtimeDir,
+          stateDir,
+          workspaceDir,
+          ...(runtimeRecord?.port === undefined ? {} : { port: runtimeRecord.port }),
+          args,
+        }) ?? record.entrypointCommand
+
+      const [file, ...fixedArgs] = command
       if (!file) {
-        return yield* userError("runtime.runShimmedCommand", `missing binary for ${record.implementation}`)
+        return yield* userError(
+          "runtime.runShimmedCommand",
+          `implementation does not expose a direct shim command: ${record.implementation}`,
+        )
       }
 
       const child = yield* Effect.try({
@@ -1014,11 +1180,13 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
       const current = yield* store.readCurrentSelection
       if (resolvedTarget) {
         const parsed = yield* parseReference(resolvedTarget)
+        yield* requireInteractableImplementation(parsed.implementation, "stopSelection")
         record = yield* store.resolveInstalledRecord(parsed.implementation, parsed.version)
       } else {
         if (!current) {
           return { stopped: false } satisfies StopSelectionResult
         }
+        yield* requireInteractableImplementation(current.implementation, "stopSelection")
         record = yield* store.resolveInstalledRecord(current.implementation, current.version)
       }
 

@@ -7,7 +7,7 @@ import { Effect, Option, Redacted } from "effect"
 import type { InstallRecord } from "../adapter/types.ts"
 import { userError } from "../errors.ts"
 import { ClawctlPathsService } from "../paths-service.ts"
-import { ClawctlRuntimeService } from "../runtime-service.ts"
+import { ClawctlRuntimeService, startupFailureMessage } from "../runtime-service.ts"
 import { sharedConfigToEntries } from "../shared-config.ts"
 import { ClawctlStoreService } from "../store-service.ts"
 import { makeRuntimeTestLayer, runWithLayer } from "../test-layer.ts"
@@ -33,10 +33,16 @@ async function writeOpenclawExecutable(destination: string) {
 if [ "$1" = "gateway" ] && [ "$2" = "run" ]; then
   mkdir -p "\${OPENCLAW_STATE_DIR}"
   touch "\${OPENCLAW_STATE_DIR}/ready"
-  trap 'rm -f "\${OPENCLAW_STATE_DIR}/ready"; exit 0' TERM INT
-  while true; do
-    sleep 1
+  port="28789"
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--port" ]; then
+      port="$arg"
+    fi
+    prev="$arg"
   done
+  trap 'rm -f "\${OPENCLAW_STATE_DIR}/ready"; exit 0' TERM INT
+  exec node -e 'const http=require("http"); const fs=require("fs"); const stateDir=process.argv[1]; const port=Number(process.argv[2]); const server=http.createServer((_req,res)=>{ res.statusCode=200; res.end("ok");}); server.listen(port, "127.0.0.1"); const shutdown=()=>{ try{ fs.rmSync(stateDir + "/ready", { force: true }); }catch{} server.close(()=>process.exit(0)); }; process.on("SIGTERM", shutdown); process.on("SIGINT", shutdown);' "\${OPENCLAW_STATE_DIR}" "$port"
 fi
 
 if [ "$1" = "gateway" ] && [ "$2" = "health" ]; then
@@ -113,6 +119,26 @@ afterEach(async () => {
 })
 
 describe("runtime service", () => {
+  test("startupFailureMessage explains stock nanoclaw channel requirements", () => {
+    const message = startupFailureMessage("nanoclaw", "process exited", {
+      logSource: "[16:45:23.080] FATAL (95327): No channels connected",
+      excerpt: "No channels connected",
+    })
+
+    expect(message).toContain("stock nanoclaw has no channels configured")
+    expect(message).toContain("/add-telegram")
+  })
+
+  test("startupFailureMessage explains nanoclaw native module rebuild failures", () => {
+    const message = startupFailureMessage("nanoclaw", "process exited", {
+      logSource: 'Error: foo\n"code": "ERR_DLOPEN_FAILED"',
+      excerpt: "ERR_DLOPEN_FAILED",
+    })
+
+    expect(message).toContain("native module load failed")
+    expect(message).toContain("clawctl uninstall --all nanoclaw && clawctl install nanoclaw")
+  })
+
   test("ensureActiveChatTarget uses the current selection", async () => {
     const root = await createRoot()
     const record = installRecord(root)
@@ -151,7 +177,7 @@ describe("runtime service", () => {
     ).rejects.toThrow("no active claw selected")
   })
 
-  test("rejects unsupported capabilities", async () => {
+  test("rejects install-only adapters before attempting chat activation", async () => {
     const root = await createRoot()
     const record: InstallRecord = {
       ...installRecord(root),
@@ -174,7 +200,38 @@ describe("runtime service", () => {
         }),
         makeRuntimeTestLayer(root),
       ),
-    ).rejects.toThrow("nanoclaw does not expose a stable local loopback or host-side chat transport yet")
+    ).rejects.toThrow("nanoclaw is install-only in clawctl; it is not interactable or executable")
+  })
+
+  test("rejects shim execution for install-only adapters", async () => {
+    const root = await createRoot()
+    const record: InstallRecord = {
+      ...installRecord(root),
+      implementation: "bitclaw",
+      installStrategy: "repo-bootstrap",
+      installRoot: join(root, "installs", "local", "bitclaw", "main"),
+      entrypointCommand: [join(root, "tools", "bitclaw")],
+      requestedVersion: "main",
+      resolvedVersion: "main",
+      supportTier: "tier3",
+    }
+
+    await expect(
+      runWithLayer(
+        Effect.gen(function* () {
+          const store = yield* ClawctlStoreService
+          const runtime = yield* ClawctlRuntimeService
+          yield* store.writeInstallRecord(record)
+          yield* store.writeCurrentSelection({
+            implementation: record.implementation,
+            version: record.resolvedVersion,
+            backend: record.backend,
+          })
+          return yield* runtime.runShimmedCommand("bitclaw", [])
+        }),
+        makeRuntimeTestLayer(root),
+      ),
+    ).rejects.toThrow("bitclaw is install-only in clawctl; it is not interactable or executable")
   })
 
   test("activateSelection writes rendered config and current state", async () => {

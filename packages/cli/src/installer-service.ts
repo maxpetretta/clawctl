@@ -63,6 +63,53 @@ const PypiPackageResponseSchema = Schema.Struct({
 
 const JsonStringSchema = Schema.parseJson(Schema.String)
 
+export function rewritePythonScriptShebang(source: string, fromInterpreterDir: string, toInterpreterDir: string) {
+  const fromPrefix = `#!${fromInterpreterDir}/`
+  if (!source.startsWith(fromPrefix)) {
+    return source
+  }
+  return `#!${toInterpreterDir}/${source.slice(fromPrefix.length)}`
+}
+
+export function repairPythonScriptShebang(source: string, installedInterpreterDir: string) {
+  const newlineIndex = source.indexOf("\n")
+  const firstLine = newlineIndex === -1 ? source : source.slice(0, newlineIndex)
+  if (!firstLine.startsWith("#!")) {
+    return source
+  }
+
+  const currentInterpreter = firstLine.slice(2)
+  const marker = "/venv/bin/"
+  const markerIndex = currentInterpreter.lastIndexOf(marker)
+  if (markerIndex === -1) {
+    return source
+  }
+
+  const interpreterName = currentInterpreter.slice(markerIndex + marker.length)
+  if (interpreterName.length === 0) {
+    return source
+  }
+
+  const repairedFirstLine = `#!${installedInterpreterDir}/${interpreterName}`
+  if (firstLine === repairedFirstLine) {
+    return source
+  }
+  return `${repairedFirstLine}${source.slice(firstLine.length)}`
+}
+
+function rewriteInstallRootPaths(paths: ReadonlyArray<string>, fromRoot: string, toRoot: string): string[] {
+  const normalizedFromRoot = fromRoot.endsWith("/") ? fromRoot : `${fromRoot}/`
+  return paths.map((entry) => {
+    if (entry === fromRoot) {
+      return toRoot
+    }
+    if (entry.startsWith(normalizedFromRoot)) {
+      return `${toRoot}${entry.slice(fromRoot.length)}`
+    }
+    return entry
+  })
+}
+
 function githubApiOrigin(): string {
   return process.env.CLAWCTL_GITHUB_API_ORIGIN?.replace(/\/+$/u, "") ?? "https://api.github.com"
 }
@@ -269,7 +316,35 @@ export const ClawctlInstallerLive = Layer.effect(
         yield* runCommand("installer.extractZip", "unzip", ["-o", assetPath, "-d", extractDir])
       }
 
-      const extractedBinary = path.resolve(extractDir, archiveKind.binaryPath)
+      const preferredBinary = path.resolve(extractDir, archiveKind.binaryPath)
+      const preferredExists = yield* withSystemError("installer.statExtractedBinary", fs.exists(preferredBinary))
+      const extractedBinary = preferredExists
+        ? preferredBinary
+        : yield* Effect.gen(function* () {
+            const entries = yield* withSystemError(
+              "installer.readExtractDir",
+              fs.readDirectory(extractDir, { recursive: true }),
+            )
+            const matches = entries
+              .filter((entry) => path.basename(entry) === binaryName)
+              .map((entry) => path.resolve(extractDir, entry))
+            if (matches.length === 1) {
+              const [match] = matches
+              if (match) {
+                return match
+              }
+            }
+            if (matches.length === 0) {
+              return yield* userError(
+                "installer.materializeReleaseBinary",
+                `release archive did not contain ${archiveKind.binaryPath} or a unique ${binaryName} binary`,
+              )
+            }
+            return yield* userError(
+              "installer.materializeReleaseBinary",
+              `release archive contained multiple ${binaryName} binaries; adapter binaryPath must be explicit`,
+            )
+          })
       yield* withSystemError("installer.moveExtractedBinary", fs.rename(extractedBinary, destination))
       yield* withSystemError("installer.chmodExtractedBinary", fs.chmod(destination, 0o755))
       return destination
@@ -287,6 +362,30 @@ export const ClawctlInstallerLive = Layer.effect(
       )
       yield* withSystemError("installer.finalizeInstall", fs.rename(stageRoot, destinationRoot))
       return destinationRoot
+    })
+
+    const rewriteInstalledPythonEntrypoints = Effect.fn(
+      "ClawctlInstallerService.rewriteInstalledPythonEntrypoints",
+    )(function* (stageRoot: string, installRootPath: string, entrypoint: string) {
+      const stageInterpreterDir = path.resolve(stageRoot, "venv", "bin")
+      const installedInterpreterDir = path.resolve(installRootPath, "venv", "bin")
+      const scriptPaths = [
+        path.resolve(installRootPath, "venv", "bin", entrypoint),
+        path.resolve(installRootPath, "bin", entrypoint),
+      ]
+
+      for (const scriptPath of scriptPaths) {
+        const exists = yield* withSystemError("installer.statPythonEntrypoint", fs.exists(scriptPath))
+        if (!exists) {
+          continue
+        }
+        const source = yield* withSystemError("installer.readPythonEntrypoint", fs.readFileString(scriptPath))
+        const rewritten = rewritePythonScriptShebang(source, stageInterpreterDir, installedInterpreterDir)
+        if (rewritten !== source) {
+          yield* withSystemError("installer.writePythonEntrypoint", fs.writeFileString(scriptPath, rewritten))
+          yield* withSystemError("installer.chmodPythonEntrypoint", fs.chmod(scriptPath, 0o755))
+        }
+      }
     })
 
     const resolveNpmVersion = Effect.fn("ClawctlInstallerService.resolveNpmVersion")(function* (
@@ -541,18 +640,28 @@ export const ClawctlInstallerLive = Layer.effect(
 
       const resolvedVersion = yield* resolvePythonVersion(strategy, requestedVersion)
       const stageRoot = partialInstallRoot(implementationId, resolvedVersion, stageToken())
+      const venvRoot = path.resolve(stageRoot, "venv")
+      const venvPython = path.resolve(venvRoot, "bin", "python")
+      const stageBinDir = path.resolve(stageRoot, "bin")
+      const stageEntrypoint = path.resolve(stageBinDir, strategy.entrypoint)
       yield* withSystemError("installer.makeStageDir", fs.makeDirectory(stageRoot, { recursive: true }))
+
+      yield* runCommand("installer.createPythonVenv", uvExecutable(), ["venv", venvRoot], { env: process.env })
 
       yield* runCommand(
         "installer.installPythonPackage",
         uvExecutable(),
-        ["tool", "install", "--tool-dir", stageRoot, `${strategy.packageName}==${resolvedVersion}`],
+        ["pip", "install", "--python", venvPython, `${strategy.packageName}==${resolvedVersion}`],
         { env: process.env },
       )
 
-      const binaryPath = path.resolve(stageRoot, "bin", strategy.entrypoint)
+      const binaryPath = path.resolve(venvRoot, "bin", strategy.entrypoint)
       yield* withSystemError("installer.checkPythonBinary", fs.access(binaryPath))
+      yield* withSystemError("installer.makePythonBinDir", fs.makeDirectory(stageBinDir, { recursive: true }))
+      yield* withSystemError("installer.linkPythonBinary", fs.copyFile(binaryPath, stageEntrypoint))
+      yield* withSystemError("installer.checkLinkedPythonBinary", fs.access(stageEntrypoint))
       const installRootPath = yield* finalizeInstall(stageRoot, implementationId, resolvedVersion)
+      yield* rewriteInstalledPythonEntrypoints(stageRoot, installRootPath, strategy.entrypoint)
       const hostPlatform = yield* requireHostPlatform()
 
       return createInstallRecord(implementationId, supportTier, {
@@ -622,7 +731,7 @@ export const ClawctlInstallerLive = Layer.effect(
 
       return createInstallRecord(implementationId, supportTier, {
         backend: "local",
-        entrypointCommand,
+        entrypointCommand: rewriteInstallRootPaths(entrypointCommand, stageRoot, installRootPath),
         installRoot: installRootPath,
         installStrategy: strategy.strategy,
         platform: hostPlatform,

@@ -33,6 +33,10 @@ const requiredValue = Args.text({ name: "value" }).pipe(Args.withDescription("Ne
 const requiredMessage = Args.text({ name: "message" }).pipe(
   Args.withDescription("User message to send to the selected claw."),
 )
+const optionalShell = Args.text({ name: "shell" }).pipe(
+  Args.optional,
+  Args.withDescription("Optional shell target. Defaults to the current SHELL when omitted."),
+)
 
 const rootCommand = Command.make("clawctl", {}, () =>
   Effect.flatMap(Terminal.Terminal, (terminal) => terminal.display("Use a subcommand. Try clawctl --help.\n")),
@@ -63,6 +67,10 @@ const currentCommand = Command.make("current", {}, () =>
 const cleanupCommand = Command.make("cleanup", { target: optionalTarget }, ({ target }) =>
   Effect.flatMap(ClawctlService, (service) => service.cleanup({ target })),
 ).pipe(Command.withDescription("Remove stale partial installs, orphaned runtimes, and invalid current selections."))
+
+const initCommand = Command.make("init", { shell: optionalShell }, ({ shell }) =>
+  Effect.flatMap(ClawctlService, (service) => service.init({ shell })),
+).pipe(Command.withDescription("Append clawctl PATH setup to your shell config for bash, zsh, or fish."))
 
 const listCommand = Command.make("list", { installedOnly: installedOnlyOption }, ({ installedOnly }) =>
   Effect.flatMap(ClawctlService, (service) => service.list({ installedOnly })),
@@ -115,6 +123,7 @@ const command = rootCommand.pipe(
     useCommand,
     currentCommand,
     cleanupCommand,
+    initCommand,
     listCommand,
     versionsCommand,
     doctorCommand,
@@ -155,5 +164,30 @@ const MainLayer = ClawctlLive.pipe(
 const handledDaemon = await maybeRunManagedDaemon(process.argv)
 const handledShim = handledDaemon ? false : await maybeRunShimmedCommand(process.argv)
 if (!(handledDaemon || handledShim)) {
-  cli(process.argv).pipe(Effect.provide(MainLayer), BunRuntime.runMain)
+  cli(process.argv).pipe(
+    Effect.catchTags({
+      ClawctlSystemError: (error) =>
+        Effect.flatMap(Terminal.Terminal, (terminal) =>
+          terminal.display(`${error.message}\n`).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                process.exitCode = 1
+              }),
+            ),
+          ),
+        ),
+      ClawctlUserError: (error) =>
+        Effect.flatMap(Terminal.Terminal, (terminal) =>
+          terminal.display(`${error.message}\n`).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                process.exitCode = 1
+              }),
+            ),
+          ),
+        ),
+    }),
+    Effect.provide(MainLayer),
+    BunRuntime.runMain,
+  )
 }
