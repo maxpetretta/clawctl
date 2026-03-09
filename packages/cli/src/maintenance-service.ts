@@ -3,9 +3,9 @@ import * as CommandExecutor from "@effect/platform/CommandExecutor"
 import * as FileSystem from "@effect/platform/FileSystem"
 import { Context, Effect, Layer } from "effect"
 
-import { getRegisteredImplementation } from "./adapter/registry.ts"
+import { makeResolveRegistration } from "./service-helpers.ts"
 import type { InstallManifest, PlatformSelector } from "./adapter/schema.ts"
-import { type ClawctlError, userError, withSystemError } from "./errors.ts"
+import { type ClawctlError, withSystemError } from "./errors.ts"
 import { ClawctlPathsService } from "./paths-service.ts"
 import { currentHostPlatform } from "./platform.ts"
 import { missingSharedConfigKeys } from "./shared-config.ts"
@@ -82,15 +82,7 @@ export const ClawctlMaintenanceLive = Layer.effect(
     const fs = yield* FileSystem.FileSystem
     const { path, paths } = yield* ClawctlPathsService
     const store = yield* ClawctlStoreService
-    const resolveRegistration = Effect.fn("ClawctlMaintenanceService.resolveRegistration")(function* (
-      implementation: string,
-    ) {
-      return yield* Effect.try({
-        try: () => getRegisteredImplementation(implementation),
-        catch: (cause) =>
-          userError("maintenance.resolveRegistration", cause instanceof Error ? cause.message : String(cause)),
-      })
-    })
+    const resolveRegistration = makeResolveRegistration("ClawctlMaintenanceService")
 
     const commandExists = Effect.fn("ClawctlMaintenanceService.commandExists")(function* (command: string) {
       if (command.includes("/")) {

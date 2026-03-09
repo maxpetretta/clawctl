@@ -9,7 +9,7 @@ import * as HttpClientResponse from "@effect/platform/HttpClientResponse"
 import { Context, Effect, Layer } from "effect"
 import * as Schema from "effect/Schema"
 
-import { getRegisteredImplementation } from "./adapter/registry.ts"
+import { makeResolveRegistration } from "./service-helpers.ts"
 import type {
   GithubReleaseInstallManifest,
   InstallManifest,
@@ -143,15 +143,7 @@ export const ClawctlInstallerLive = Layer.effect(
     const httpClient = yield* HttpClient.HttpClient
     const { installParentDir, installRoot, partialInstallRoot, path, paths } = yield* ClawctlPathsService
     const store = yield* ClawctlStoreService
-    const resolveRegistration = Effect.fn("ClawctlInstallerService.resolveRegistration")(function* (
-      implementation: string,
-    ) {
-      return yield* Effect.try({
-        try: () => getRegisteredImplementation(implementation),
-        catch: (cause) =>
-          userError("installer.resolveRegistration", cause instanceof Error ? cause.message : String(cause)),
-      })
-    })
+    const resolveRegistration = makeResolveRegistration("ClawctlInstallerService")
     const requireHostPlatform = Effect.fn("ClawctlInstallerService.requireHostPlatform")(function* () {
       return yield* Effect.try({
         try: () => requireV1HostPlatform(),
