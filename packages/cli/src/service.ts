@@ -1,25 +1,21 @@
 import { basename } from "node:path"
 import * as FileSystem from "@effect/platform/FileSystem"
 import * as Terminal from "@effect/platform/Terminal"
-import { Context, type Effect, Effect as EffectRuntime, Fiber, Layer, Option } from "effect"
+import { Context, Effect, Fiber, Layer, Option } from "effect"
 
-import {
-  getRegisteredImplementation,
-  installOnlyInteractionMessage,
-  isInstallOnlyRegistration,
-  listRegisteredImplementations,
-} from "./adapter/registry.ts"
+import { listRegisteredImplementations } from "./adapter/registry.ts"
 import type { InstallRecord, RegisteredImplementation } from "./adapter/types.ts"
 import { validateAdapterRegistry } from "./adapter/validate.ts"
 import { type ClawctlError, userError, withSystemError } from "./errors.ts"
-import { ClawctlInstallerLive, ClawctlInstallerService } from "./installer-service.ts"
-import { ClawctlMaintenanceLive, ClawctlMaintenanceService } from "./maintenance-service.ts"
+import { ClawctlInstallerService } from "./installer-service.ts"
+import { fullDependencyLayer } from "./layer.ts"
+import { ClawctlMaintenanceService } from "./maintenance-service.ts"
 import type { RuntimeBackend } from "./model.ts"
-import { ClawctlPathsLive, ClawctlPathsService } from "./paths-service.ts"
-import { ClawctlRuntimeLive, ClawctlRuntimeService } from "./runtime-service.ts"
+import { ClawctlPathsService } from "./paths-service.ts"
+import { ClawctlRuntimeService } from "./runtime-service.ts"
+import { makeParseReference, makeRequireInteractableImplementation, makeResolveRegistration } from "./service-helpers.ts"
 import { sharedConfigValue } from "./shared-config.ts"
-import { ClawctlStoreLive, ClawctlStoreService } from "./store-service.ts"
-import { parseTargetReference } from "./target.ts"
+import { ClawctlStoreService } from "./store-service.ts"
 
 type TargetSelection = {
   runtime: RuntimeBackend
@@ -65,7 +61,7 @@ function printStatus(
   },
 ): Effect.Effect<void, ClawctlError> {
   const runtime = registration.manifest.backends.find((backend) => backend.kind === record.backend)?.runtime
-  return EffectRuntime.gen(function* () {
+  return Effect.gen(function* () {
     const runtimeStateLabel = runtime?.supervision.kind === "unmanaged" ? "install-only" : runtimeState.state
     yield* writeLine(`${record.implementation}@${record.resolvedVersion}`)
     yield* writeLine(`  backend: ${record.backend}`)
@@ -161,17 +157,9 @@ function clearLine(text: string): string {
   return `\r${" ".repeat(text.length)}\r`
 }
 
-const pathsLayer = ClawctlPathsLive
-const storeLayer = ClawctlStoreLive.pipe(Layer.provide(pathsLayer))
-const storeDependencies = Layer.mergeAll(pathsLayer, storeLayer)
-const installerLayer = ClawctlInstallerLive.pipe(Layer.provide(storeDependencies))
-const maintenanceLayer = ClawctlMaintenanceLive.pipe(Layer.provide(storeDependencies))
-const runtimeLayer = ClawctlRuntimeLive.pipe(Layer.provide(Layer.mergeAll(pathsLayer, storeLayer)))
-const dependencyLayer = Layer.mergeAll(pathsLayer, storeLayer, installerLayer, maintenanceLayer, runtimeLayer)
-
 const clawctlServiceLayer = Layer.effect(
   ClawctlService,
-  EffectRuntime.gen(function* () {
+  Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem
     const terminal = yield* Terminal.Terminal
     const paths = yield* ClawctlPathsService
@@ -180,27 +168,17 @@ const clawctlServiceLayer = Layer.effect(
     const runtime = yield* ClawctlRuntimeService
     const maintenance = yield* ClawctlMaintenanceService
     const writeLine = (text: string) => withSystemError("service.display", terminal.display(`${text}\n`))
-    const resolveRegistration = EffectRuntime.fn("ClawctlService.resolveRegistration")(function* (
-      implementation: string,
-    ) {
-      return yield* EffectRuntime.try({
-        try: () => getRegisteredImplementation(implementation),
-        catch: (cause) =>
-          userError("service.resolveRegistration", cause instanceof Error ? cause.message : String(cause)),
-      })
-    })
-    const parseReference = EffectRuntime.fn("ClawctlService.parseReference")(function* (target: string) {
-      return yield* EffectRuntime.try({
-        try: () => parseTargetReference(target),
-        catch: (cause) =>
-          userError("service.parseTargetReference", cause instanceof Error ? cause.message : String(cause)),
-      })
-    })
-    const validateRegistry = EffectRuntime.try({
+    const resolveRegistration = makeResolveRegistration("ClawctlService")
+    const parseReference = makeParseReference("ClawctlService")
+    const requireInteractableImplementation = makeRequireInteractableImplementation(
+      "ClawctlService",
+      resolveRegistration,
+    )
+    const validateRegistry = Effect.try({
       try: () => validateAdapterRegistry(),
       catch: (cause) => userError("service.validateRegistry", cause instanceof Error ? cause.message : String(cause)),
     })
-    const parseOptionalImplementationTarget = EffectRuntime.fn("ClawctlService.parseOptionalImplementationTarget")(
+    const parseOptionalImplementationTarget = Effect.fn("ClawctlService.parseOptionalImplementationTarget")(
       function* (target: Option.Option<string>) {
         if (Option.isNone(target)) {
           return undefined
@@ -209,7 +187,7 @@ const clawctlServiceLayer = Layer.effect(
         return parsed.implementation
       },
     )
-    const activationSupported = EffectRuntime.fn("ClawctlService.activationSupported")(function* (
+    const activationSupported = Effect.fn("ClawctlService.activationSupported")(function* (
       implementation: string,
     ) {
       const registration = yield* resolveRegistration(implementation)
@@ -218,23 +196,14 @@ const clawctlServiceLayer = Layer.effect(
       )
       return localBackend?.runtime.supervision.kind !== "unmanaged"
     })
-    const requireInteractableImplementation = EffectRuntime.fn("ClawctlService.requireInteractableImplementation")(
-      function* (implementation: string, action: string) {
-        const registration = yield* resolveRegistration(implementation)
-        if (isInstallOnlyRegistration(registration)) {
-          return yield* userError(`service.${action}`, installOnlyInteractionMessage(implementation))
-        }
-        return registration
-      },
-    )
     const requireLocalRuntime = (runtime: string) =>
       runtime === "local"
-        ? EffectRuntime.void
-        : EffectRuntime.fail(userError("service.runtime", `runtime is not implemented yet: ${runtime}`))
+        ? Effect.void
+        : Effect.fail(userError("service.runtime", `runtime is not implemented yet: ${runtime}`))
     const pathEntries = pathEntriesFromEnv(process.env.PATH)
     const activeShimDirOnPath = pathEntries.includes(paths.paths.binDir)
     const homeDir = process.env.HOME
-    const resolveShellHint = EffectRuntime.fn("ClawctlService.resolveShellHint")(function* (
+    const resolveShellHint = Effect.fn("ClawctlService.resolveShellHint")(function* (
       shellOverride: Option.Option<string>,
     ) {
       const detected = Option.match(shellOverride, {
@@ -246,7 +215,7 @@ const clawctlServiceLayer = Layer.effect(
       }
       return shellPathHint(detected, paths.paths.binDir, homeDir)
     })
-    const resolvePathCommand = EffectRuntime.fn("ClawctlService.resolvePathCommand")(function* (commandName: string) {
+    const resolvePathCommand = Effect.fn("ClawctlService.resolvePathCommand")(function* (commandName: string) {
       for (const entry of pathEntries) {
         const candidate = paths.path.resolve(entry, commandName)
         const exists = yield* withSystemError("service.resolvePathCommand", fs.exists(candidate))
@@ -257,8 +226,8 @@ const clawctlServiceLayer = Layer.effect(
       return undefined
     })
     const withInstallSpinner = <A>(effect: Effect.Effect<A, ClawctlError>): Effect.Effect<A, ClawctlError> =>
-      EffectRuntime.scoped(
-        EffectRuntime.gen(function* () {
+      Effect.scoped(
+        Effect.gen(function* () {
           const label = "installing"
           const interactive = yield* withSystemError("service.spinnerTty", terminal.isTTY)
           if (!interactive) {
@@ -266,24 +235,24 @@ const clawctlServiceLayer = Layer.effect(
             return yield* effect
           }
           const frames = ["", ".", "..", "..."] as const
-          const spinner = yield* EffectRuntime.forkScoped(
-            EffectRuntime.forever(
-              EffectRuntime.forEach(
+          const spinner = yield* Effect.forkScoped(
+            Effect.forever(
+              Effect.forEach(
                 frames,
                 (frame) =>
                   withSystemError("service.spinnerDisplay", terminal.display(`\r${label}${frame}   `)).pipe(
-                    EffectRuntime.zipRight(EffectRuntime.sleep("120 millis")),
+                    Effect.zipRight(Effect.sleep("120 millis")),
                   ),
                 { discard: true },
               ),
             ),
           )
           return yield* effect.pipe(
-            EffectRuntime.ensuring(
-              EffectRuntime.zipRight(
+            Effect.ensuring(
+              Effect.zipRight(
                 Fiber.interrupt(spinner),
                 withSystemError("service.spinnerClear", terminal.display(`${clearLine(`${label}...   `)}`)).pipe(
-                  EffectRuntime.catchAll(() => EffectRuntime.void),
+                  Effect.catchAll(() => Effect.void),
                 ),
               ),
             ),
@@ -291,7 +260,7 @@ const clawctlServiceLayer = Layer.effect(
         }),
       )
 
-    const chat = EffectRuntime.fn("ClawctlService.chat")(function* (input: {
+    const chat = Effect.fn("ClawctlService.chat")(function* (input: {
       message: string
       target: Option.Option<string>
     }) {
@@ -300,7 +269,7 @@ const clawctlServiceLayer = Layer.effect(
       yield* writeLine(response)
     })
 
-    const cleanup = EffectRuntime.fn("ClawctlService.cleanup")(function* (input: { target: Option.Option<string> }) {
+    const cleanup = Effect.fn("ClawctlService.cleanup")(function* (input: { target: Option.Option<string> }) {
       const parsedReference = Option.isSome(input.target) ? yield* parseReference(input.target.value) : undefined
       if (parsedReference?.version) {
         return yield* userError("service.cleanup", "cleanup target must not include a version")
@@ -312,7 +281,7 @@ const clawctlServiceLayer = Layer.effect(
       )
     })
 
-    const configGet = EffectRuntime.fn("ClawctlService.configGet")(function* (key: string) {
+    const configGet = Effect.fn("ClawctlService.configGet")(function* (key: string) {
       const config = yield* store.readSharedConfig
       const value = sharedConfigValue(config, key)
       if (value === undefined) {
@@ -321,13 +290,13 @@ const clawctlServiceLayer = Layer.effect(
       yield* writeLine(value)
     })
 
-    const configSet = EffectRuntime.fn("ClawctlService.configSet")(function* (input: { key: string; value: string }) {
+    const configSet = Effect.fn("ClawctlService.configSet")(function* (input: { key: string; value: string }) {
       yield* store.ensureSharedConfig
       yield* store.setSharedConfigValue(input.key, input.value)
       yield* writeLine(`set ${input.key}`)
     })
 
-    const current = EffectRuntime.gen(function* () {
+    const current = Effect.gen(function* () {
       const selection = yield* store.readCurrentSelection
       if (!selection) {
         yield* writeLine("no active claw")
@@ -335,8 +304,8 @@ const clawctlServiceLayer = Layer.effect(
       }
 
       const stillInstalled = yield* store.resolveInstalledRecord(selection.implementation, selection.version).pipe(
-        EffectRuntime.as(true),
-        EffectRuntime.catchAll(() => EffectRuntime.succeed(false)),
+        Effect.as(true),
+        Effect.catchAll(() => Effect.succeed(false)),
       )
       if (!stillInstalled) {
         yield* store.clearCurrentSelection
@@ -345,9 +314,9 @@ const clawctlServiceLayer = Layer.effect(
       }
 
       yield* writeLine(`${selection.implementation}@${selection.version} (${selection.backend})`)
-    }).pipe(EffectRuntime.withSpan("ClawctlService.current"))
+    }).pipe(Effect.withSpan("ClawctlService.current"))
 
-    const doctor = EffectRuntime.fn("ClawctlService.doctor")(function* (input: { target: Option.Option<string> }) {
+    const doctor = Effect.fn("ClawctlService.doctor")(function* (input: { target: Option.Option<string> }) {
       yield* validateRegistry
       const parsedTarget = yield* parseOptionalImplementationTarget(input.target)
       if (parsedTarget) {
@@ -363,14 +332,14 @@ const clawctlServiceLayer = Layer.effect(
       }
     })
 
-    const install = EffectRuntime.fn("ClawctlService.install")(function* (input: { runtime: string; target: string }) {
+    const install = Effect.fn("ClawctlService.install")(function* (input: { runtime: string; target: string }) {
       yield* requireLocalRuntime(input.runtime)
       const parsed = yield* parseReference(input.target)
       const record = yield* withInstallSpinner(installer.installImplementation(parsed.implementation, parsed.version))
       yield* writeLine(`installed ${record.implementation}@${record.resolvedVersion}`)
     })
 
-    const init = EffectRuntime.fn("ClawctlService.init")(function* (input: { shell: Option.Option<string> }) {
+    const init = Effect.fn("ClawctlService.init")(function* (input: { shell: Option.Option<string> }) {
       const hint = yield* resolveShellHint(input.shell)
       const parentDir = paths.path.dirname(hint.configFile)
       yield* withSystemError("service.initMakeDir", fs.makeDirectory(parentDir, { recursive: true }))
@@ -386,7 +355,7 @@ const clawctlServiceLayer = Layer.effect(
       yield* writeLine(hint.line)
     })
 
-    const list = EffectRuntime.fn("ClawctlService.list")(function* (input: { installedOnly: boolean }) {
+    const list = Effect.fn("ClawctlService.list")(function* (input: { installedOnly: boolean }) {
       const records = yield* store.listInstallRecords
       const currentSelection = yield* store.readCurrentSelection
 
@@ -405,18 +374,19 @@ const clawctlServiceLayer = Layer.effect(
         const installed = records
           .filter((record) => record.implementation === registration.manifest.id)
           .map((record) => record.resolvedVersion)
-        yield* writeLine(`${registration.manifest.id} (${registration.manifest.supportTier})`)
-        yield* writeLine(`  installed: ${installed.length > 0 ? installed.join(", ") : "<none>"}`)
+        yield* writeLine(
+          `${registration.manifest.id}: ${installed.length > 0 ? installed.join(", ") : "not installed"}`,
+        )
       }
     })
 
-    const ping = EffectRuntime.fn("ClawctlService.ping")(function* (input: { target: Option.Option<string> }) {
+    const ping = Effect.fn("ClawctlService.ping")(function* (input: { target: Option.Option<string> }) {
       const installRecord = yield* runtime.ensureActiveChatTarget(input.target, "ping")
       const response = yield* runtime.requestChat(installRecord, runtime.pingText())
       yield* writeLine(response)
     })
 
-    const status = EffectRuntime.fn("ClawctlService.status")(function* (input: { target: Option.Option<string> }) {
+    const status = Effect.fn("ClawctlService.status")(function* (input: { target: Option.Option<string> }) {
       const currentSelection = yield* store.readCurrentSelection
       if (Option.isSome(input.target)) {
         const parsed = yield* parseReference(input.target.value)
@@ -440,7 +410,7 @@ const clawctlServiceLayer = Layer.effect(
       yield* printStatus(writeLine, record, true, registration, yield* runtime.runtimeState(record))
     })
 
-    const stop = EffectRuntime.fn("ClawctlService.stop")(function* (input: {
+    const stop = Effect.fn("ClawctlService.stop")(function* (input: {
       runtime: string
       target: Option.Option<string>
     }) {
@@ -466,7 +436,7 @@ const clawctlServiceLayer = Layer.effect(
       )
     })
 
-    const uninstall = EffectRuntime.fn("ClawctlService.uninstall")(function* (input: {
+    const uninstall = Effect.fn("ClawctlService.uninstall")(function* (input: {
       all: boolean
       runtime: string
       target: string
@@ -499,7 +469,7 @@ const clawctlServiceLayer = Layer.effect(
       for (const record of records) {
         yield* runtime
           .stopSelection(Option.some(`${record.implementation}@${record.resolvedVersion}`))
-          .pipe(EffectRuntime.catchAll(() => EffectRuntime.void))
+          .pipe(Effect.catchAll(() => Effect.void))
         yield* store.removeRuntime(record.implementation, record.resolvedVersion, record.backend)
         yield* store.removeInstall(record)
       }
@@ -517,7 +487,7 @@ const clawctlServiceLayer = Layer.effect(
       yield* writeLine(`uninstalled ${record.implementation}@${record.resolvedVersion}`)
     })
 
-    const use = EffectRuntime.fn("ClawctlService.use")(function* (input: { runtime: string; target: string }) {
+    const use = Effect.fn("ClawctlService.use")(function* (input: { runtime: string; target: string }) {
       yield* requireLocalRuntime(input.runtime)
       const parsed = yield* parseReference(input.target)
       yield* requireInteractableImplementation(parsed.implementation, "use")
@@ -527,7 +497,7 @@ const clawctlServiceLayer = Layer.effect(
 
       const record = yield* store
         .resolveInstalledRecord(parsed.implementation, parsed.version)
-        .pipe(EffectRuntime.catchAll(() => installer.installImplementation(parsed.implementation, parsed.version)))
+        .pipe(Effect.catchAll(() => installer.installImplementation(parsed.implementation, parsed.version)))
       const activated = yield* runtime.activateSelection({
         implementation: record.implementation,
         version: parsed.version ?? record.resolvedVersion,
@@ -562,7 +532,7 @@ const clawctlServiceLayer = Layer.effect(
       }
     })
 
-    const versions = EffectRuntime.fn("ClawctlService.versions")(function* (target: string) {
+    const versions = Effect.fn("ClawctlService.versions")(function* (target: string) {
       const parsed = yield* parseReference(target)
       if (parsed.version) {
         return yield* userError("service.versions", "versions target must not include a version")
@@ -592,6 +562,6 @@ const clawctlServiceLayer = Layer.effect(
       versions,
     })
   }),
-).pipe(Layer.provide(dependencyLayer))
+).pipe(Layer.provide(fullDependencyLayer))
 
 export const ClawctlLive = clawctlServiceLayer
