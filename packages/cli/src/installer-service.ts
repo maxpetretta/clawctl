@@ -8,8 +8,6 @@ import * as HttpClientRequest from "@effect/platform/HttpClientRequest"
 import * as HttpClientResponse from "@effect/platform/HttpClientResponse"
 import { Context, Effect, Layer } from "effect"
 import * as Schema from "effect/Schema"
-
-import { makeResolveRegistration } from "./service-helpers.ts"
 import type {
   GithubReleaseInstallManifest,
   InstallManifest,
@@ -19,9 +17,11 @@ import type {
   VersionSourceManifest,
 } from "./adapter/schema.ts"
 import type { InstallRecord } from "./adapter/types.ts"
+import { ensureClawctlDirectories } from "./directory-helpers.ts"
 import { type ClawctlError, type ClawctlSystemError, userError, withSystemError } from "./errors.ts"
 import { ClawctlPathsService } from "./paths-service.ts"
 import { requireV1HostPlatform } from "./platform.ts"
+import { makeResolveRegistration } from "./service-helpers.ts"
 import { ClawctlStoreService } from "./store-service.ts"
 import { gitExecutable, npmExecutable, uvExecutable } from "./tooling.ts"
 
@@ -356,29 +356,29 @@ export const ClawctlInstallerLive = Layer.effect(
       return destinationRoot
     })
 
-    const rewriteInstalledPythonEntrypoints = Effect.fn(
-      "ClawctlInstallerService.rewriteInstalledPythonEntrypoints",
-    )(function* (stageRoot: string, installRootPath: string, entrypoint: string) {
-      const stageInterpreterDir = path.resolve(stageRoot, "venv", "bin")
-      const installedInterpreterDir = path.resolve(installRootPath, "venv", "bin")
-      const scriptPaths = [
-        path.resolve(installRootPath, "venv", "bin", entrypoint),
-        path.resolve(installRootPath, "bin", entrypoint),
-      ]
+    const rewriteInstalledPythonEntrypoints = Effect.fn("ClawctlInstallerService.rewriteInstalledPythonEntrypoints")(
+      function* (stageRoot: string, installRootPath: string, entrypoint: string) {
+        const stageInterpreterDir = path.resolve(stageRoot, "venv", "bin")
+        const installedInterpreterDir = path.resolve(installRootPath, "venv", "bin")
+        const scriptPaths = [
+          path.resolve(installRootPath, "venv", "bin", entrypoint),
+          path.resolve(installRootPath, "bin", entrypoint),
+        ]
 
-      for (const scriptPath of scriptPaths) {
-        const exists = yield* withSystemError("installer.statPythonEntrypoint", fs.exists(scriptPath))
-        if (!exists) {
-          continue
+        for (const scriptPath of scriptPaths) {
+          const exists = yield* withSystemError("installer.statPythonEntrypoint", fs.exists(scriptPath))
+          if (!exists) {
+            continue
+          }
+          const source = yield* withSystemError("installer.readPythonEntrypoint", fs.readFileString(scriptPath))
+          const rewritten = rewritePythonScriptShebang(source, stageInterpreterDir, installedInterpreterDir)
+          if (rewritten !== source) {
+            yield* withSystemError("installer.writePythonEntrypoint", fs.writeFileString(scriptPath, rewritten))
+            yield* withSystemError("installer.chmodPythonEntrypoint", fs.chmod(scriptPath, 0o755))
+          }
         }
-        const source = yield* withSystemError("installer.readPythonEntrypoint", fs.readFileString(scriptPath))
-        const rewritten = rewritePythonScriptShebang(source, stageInterpreterDir, installedInterpreterDir)
-        if (rewritten !== source) {
-          yield* withSystemError("installer.writePythonEntrypoint", fs.writeFileString(scriptPath, rewritten))
-          yield* withSystemError("installer.chmodPythonEntrypoint", fs.chmod(scriptPath, 0o755))
-        }
-      }
-    })
+      },
+    )
 
     const resolveNpmVersion = Effect.fn("ClawctlInstallerService.resolveNpmVersion")(function* (
       strategy: NpmPackageInstallManifest,
@@ -775,12 +775,14 @@ export const ClawctlInstallerLive = Layer.effect(
         )
       }
 
-      yield* withSystemError("installer.ensureRootDir", fs.makeDirectory(paths.rootDir, { recursive: true }))
-      yield* withSystemError("installer.ensureConfigDir", fs.makeDirectory(paths.configDir, { recursive: true }))
-      yield* withSystemError("installer.ensureCacheDir", fs.makeDirectory(paths.cacheDir, { recursive: true }))
-      yield* withSystemError("installer.ensureInstallDir", fs.makeDirectory(paths.installDir, { recursive: true }))
-      yield* withSystemError("installer.ensureRuntimeDir", fs.makeDirectory(paths.runtimeDir, { recursive: true }))
-      yield* withSystemError("installer.ensureLogDir", fs.makeDirectory(paths.logDir, { recursive: true }))
+      yield* ensureClawctlDirectories(fs, paths, "installer.ensure", [
+        "root",
+        "config",
+        "cache",
+        "install",
+        "runtime",
+        "log",
+      ])
       yield* withSystemError(
         "installer.ensureInstallParent",
         fs.makeDirectory(installParentDir(implementation), { recursive: true }),

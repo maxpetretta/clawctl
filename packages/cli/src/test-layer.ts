@@ -1,5 +1,5 @@
-import { BunContext } from "@effect/platform-bun"
 import * as FetchHttpClient from "@effect/platform/FetchHttpClient"
+import { BunContext } from "@effect/platform-bun"
 import { Effect, Layer } from "effect"
 
 import { ClawctlInstallerLive } from "./installer-service.ts"

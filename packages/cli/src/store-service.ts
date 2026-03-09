@@ -2,6 +2,7 @@ import * as FileSystem from "@effect/platform/FileSystem"
 import { Context, Effect, Layer } from "effect"
 
 import type { CurrentSelection, InstallRecord, RuntimeRecord } from "./adapter/types.ts"
+import { ensureClawctlDirectories } from "./directory-helpers.ts"
 import { type ClawctlError, type ClawctlSystemError, userError, withSystemError } from "./errors.ts"
 import { ClawctlPathsService } from "./paths-service.ts"
 import {
@@ -85,12 +86,7 @@ export const ClawctlStoreLive = Layer.effect(
     } = yield* ClawctlPathsService
 
     const ensureSharedConfig = Effect.gen(function* () {
-      yield* withSystemError("store.makeRootDir", fs.makeDirectory(paths.rootDir, { recursive: true }))
-      yield* withSystemError("store.makeConfigDir", fs.makeDirectory(paths.configDir, { recursive: true }))
-      yield* withSystemError("store.makeCacheDir", fs.makeDirectory(paths.cacheDir, { recursive: true }))
-      yield* withSystemError("store.makeInstallDir", fs.makeDirectory(paths.installDir, { recursive: true }))
-      yield* withSystemError("store.makeRuntimeDir", fs.makeDirectory(paths.runtimeDir, { recursive: true }))
-      yield* withSystemError("store.makeLogDir", fs.makeDirectory(paths.logDir, { recursive: true }))
+      yield* ensureClawctlDirectories(fs, paths, "store.make", ["root", "config", "cache", "install", "runtime", "log"])
       const exists = yield* withSystemError("store.configExists", fs.exists(paths.sharedConfigFile))
       if (exists) {
         return
@@ -124,8 +120,7 @@ export const ClawctlStoreLive = Layer.effect(
     const listInstallRecords = withSystemError(
       "store.listInstallRecords",
       Effect.gen(function* () {
-        yield* withSystemError("store.makeRootDir", fs.makeDirectory(paths.rootDir, { recursive: true }))
-        yield* withSystemError("store.makeInstallDir", fs.makeDirectory(paths.installDir, { recursive: true }))
+        yield* ensureClawctlDirectories(fs, paths, "store.make", ["root", "install"])
         const localRoot = `${paths.installDir}/local`
         const localExists = yield* fs.exists(localRoot)
         if (!localExists) {
@@ -203,8 +198,7 @@ export const ClawctlStoreLive = Layer.effect(
     const writeCurrentSelection = Effect.fn("ClawctlStoreService.writeCurrentSelection")(function* (
       selection: CurrentSelection,
     ) {
-      yield* withSystemError("store.makeRootDir", fs.makeDirectory(paths.rootDir, { recursive: true }))
-      yield* withSystemError("store.makeConfigDir", fs.makeDirectory(paths.configDir, { recursive: true }))
+      yield* ensureClawctlDirectories(fs, paths, "store.make", ["root", "config"])
       yield* withSystemError(
         "store.writeCurrentSelection",
         fs.writeFileString(paths.currentFile, stringifyCurrentSelectionJson(selection)),

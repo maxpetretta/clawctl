@@ -2,12 +2,12 @@ import * as Command from "@effect/platform/Command"
 import * as CommandExecutor from "@effect/platform/CommandExecutor"
 import * as FileSystem from "@effect/platform/FileSystem"
 import { Context, Effect, Layer } from "effect"
-
-import { makeResolveRegistration } from "./service-helpers.ts"
 import type { InstallManifest, PlatformSelector } from "./adapter/schema.ts"
+import { ensureClawctlDirectories } from "./directory-helpers.ts"
 import { type ClawctlError, withSystemError } from "./errors.ts"
 import { ClawctlPathsService } from "./paths-service.ts"
 import { currentHostPlatform } from "./platform.ts"
+import { makeResolveRegistration } from "./service-helpers.ts"
 import { missingSharedConfigKeys } from "./shared-config.ts"
 import { ClawctlStoreService } from "./store-service.ts"
 import { bunExecutable, dockerExecutable, gitExecutable, npmExecutable, uvExecutable } from "./tooling.ts"
@@ -259,9 +259,7 @@ export const ClawctlMaintenanceLive = Layer.effect(
     })
 
     const runCleanup = Effect.fn("ClawctlMaintenanceService.runCleanup")(function* (target?: string) {
-      yield* withSystemError("maintenance.ensureRootDir", fs.makeDirectory(paths.rootDir, { recursive: true }))
-      yield* withSystemError("maintenance.ensureInstallDir", fs.makeDirectory(paths.installDir, { recursive: true }))
-      yield* withSystemError("maintenance.ensureRuntimeDir", fs.makeDirectory(paths.runtimeDir, { recursive: true }))
+      yield* ensureClawctlDirectories(fs, paths, "maintenance.ensure", ["root", "install", "runtime"])
 
       const installImplementations = yield* listSubdirectories(path.resolve(paths.installDir, "local"))
       const runtimeImplementations = yield* listSubdirectories(path.resolve(paths.runtimeDir, "local"))
