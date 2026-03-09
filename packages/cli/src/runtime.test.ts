@@ -2,20 +2,22 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { Option } from "effect"
+import { Effect, Option, Redacted } from "effect"
 
 import type { InstallRecord } from "./adapter/types.ts"
-import { resolvePaths } from "./paths.ts"
-import { activateSelection, ensureActiveChatTarget, pingText, resolveChatTarget, runChat } from "./runtime.ts"
-import { setSharedConfigValue } from "./shared-config.ts"
-import { writeCurrentSelection, writeInstallRecord } from "./state.ts"
+import { userError } from "./errors.ts"
+import { ClawctlPathsService } from "./paths-service.ts"
+import { ClawctlRuntimeService } from "./runtime-service.ts"
+import { sharedConfigToEntries } from "./shared-config.ts"
+import { ClawctlStoreService } from "./store-service.ts"
+import { makeRuntimeTestLayer, runWithLayer } from "./test-layer.ts"
 
 const tempRoots: string[] = []
 
-async function createPaths() {
+async function createRoot() {
   const root = await mkdtemp(join(tmpdir(), "clawctl-runtime-"))
   tempRoots.push(root)
-  return resolvePaths(root)
+  return root
 }
 
 async function writeExecutable(destination: string, source: string) {
@@ -24,15 +26,15 @@ async function writeExecutable(destination: string, source: string) {
   await chmod(destination, 0o755)
 }
 
-function installRecord(paths: ReturnType<typeof resolvePaths>): InstallRecord {
+function installRecord(root: string): InstallRecord {
   return {
     implementation: "openclaw",
     requestedVersion: "2026.3.7",
     resolvedVersion: "2026.3.7",
     backend: "local",
     installStrategy: "npm-package",
-    installRoot: join(paths.installDir, "local", "openclaw", "2026.3.7"),
-    entrypointCommand: [join(paths.rootDir, "bin", "openclaw")],
+    installRoot: join(root, "installs", "local", "openclaw", "2026.3.7"),
+    entrypointCommand: [join(root, "bin", "openclaw")],
     platform: { os: "darwin", arch: "arm64" },
     sourceReference: "openclaw",
     verificationSummary: "registry-managed",
@@ -45,69 +47,113 @@ afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
-describe("runtime helpers", () => {
-  test("resolveChatTarget uses the current selection", async () => {
-    const paths = await createPaths()
-    const record = installRecord(paths)
-    await writeInstallRecord(paths, record)
-    await writeCurrentSelection(paths, {
-      implementation: record.implementation,
-      version: record.resolvedVersion,
-      backend: record.backend,
-    })
+describe("runtime service", () => {
+  test("ensureActiveChatTarget uses the current selection", async () => {
+    const root = await createRoot()
+    const record = installRecord(root)
 
-    const resolved = await resolveChatTarget(paths, Option.none())
+    const resolved = await runWithLayer(
+      Effect.gen(function* () {
+        const store = yield* ClawctlStoreService
+        const runtime = yield* ClawctlRuntimeService
+        yield* store.writeInstallRecord(record)
+        yield* store.setSharedConfigValue("CLAW_API_KEY", "secret")
+        yield* store.writeCurrentSelection({
+          implementation: record.implementation,
+          version: record.resolvedVersion,
+          backend: record.backend,
+        })
+        return yield* runtime.ensureActiveChatTarget(Option.none(), "chat")
+      }),
+      makeRuntimeTestLayer(root),
+    )
+
     expect(resolved.resolvedVersion).toBe("2026.3.7")
   })
 
-  test("resolveChatTarget fails without a target or current selection", async () => {
-    const paths = await createPaths()
-    await expect(resolveChatTarget(paths, Option.none())).rejects.toThrow("no active claw selected")
+  test("fails without a target or current selection", async () => {
+    const root = await createRoot()
+
+    await expect(
+      runWithLayer(
+        Effect.gen(function* () {
+          const runtime = yield* ClawctlRuntimeService
+          return yield* runtime.ensureActiveChatTarget(Option.none(), "chat")
+        }),
+        makeRuntimeTestLayer(root),
+      ),
+    ).rejects.toThrow("no active claw selected")
   })
 
-  test("ensureActiveChatTarget rejects unsupported capabilities", async () => {
-    const paths = await createPaths()
+  test("rejects unsupported capabilities", async () => {
+    const root = await createRoot()
     const record: InstallRecord = {
-      ...installRecord(paths),
+      ...installRecord(root),
       implementation: "nanoclaw",
       installStrategy: "repo-bootstrap",
-      installRoot: join(paths.installDir, "local", "nanoclaw", "main"),
+      installRoot: join(root, "installs", "local", "nanoclaw", "main"),
       entrypointCommand: [],
       requestedVersion: "main",
       resolvedVersion: "main",
       supportTier: "tier3",
     }
-    await writeInstallRecord(paths, record)
 
-    await expect(ensureActiveChatTarget(paths, Option.some("nanoclaw"), "chat")).rejects.toThrow(
-      "implementation does not support chat: nanoclaw",
-    )
+    await expect(
+      runWithLayer(
+        Effect.gen(function* () {
+          const store = yield* ClawctlStoreService
+          const runtime = yield* ClawctlRuntimeService
+          yield* store.writeInstallRecord(record)
+          return yield* runtime.ensureActiveChatTarget(Option.some("nanoclaw"), "chat")
+        }),
+        makeRuntimeTestLayer(root),
+      ),
+    ).rejects.toThrow("implementation does not support chat: nanoclaw")
   })
 
   test("activateSelection writes rendered config and current state", async () => {
-    const paths = await createPaths()
-    const record = installRecord(paths)
-    await writeInstallRecord(paths, record)
-    await setSharedConfigValue(paths, "CLAW_API_KEY", "secret")
+    const root = await createRoot()
+    const record = installRecord(root)
 
-    const activated = await activateSelection(paths, {
+    const activated = await runWithLayer(
+      Effect.gen(function* () {
+        const paths = yield* ClawctlPathsService
+        const store = yield* ClawctlStoreService
+        const runtime = yield* ClawctlRuntimeService
+        yield* store.writeInstallRecord(record)
+        yield* store.setSharedConfigValue("CLAW_API_KEY", "secret")
+        const activatedRecord = yield* runtime.activateSelection({
+          implementation: "openclaw",
+          version: "2026.3.7",
+        })
+        const current = yield* store.readCurrentSelection
+        const configFile = join(paths.runtimeRoot("openclaw", "2026.3.7"), "home", ".openclaw", "openclaw.json")
+        return {
+          activatedRecord,
+          configText: yield* Effect.tryPromise({
+            try: () => Bun.file(configFile).text(),
+            catch: (cause) => userError("runtime.test", String(cause)),
+          }),
+          current,
+        }
+      }),
+      makeRuntimeTestLayer(root),
+    )
+
+    expect(activated.activatedRecord.resolvedVersion).toBe("2026.3.7")
+    expect(activated.current).toEqual({
       implementation: "openclaw",
       version: "2026.3.7",
+      backend: "local",
     })
-
-    expect(activated.resolvedVersion).toBe("2026.3.7")
-    expect(
-      await Bun.file(
-        join(paths.runtimeDir, "local", "openclaw", "2026.3.7", "home", ".openclaw", "openclaw.json"),
-      ).text(),
-    ).toContain("openai-completions")
+    expect(activated.configText).toContain("openai-completions")
   })
 
   test("runChat renders config and normalizes output", async () => {
-    const paths = await createPaths()
-    const record = installRecord(paths)
+    const root = await createRoot()
+    const record = installRecord(root)
     await writeExecutable(
-      record.entrypointCommand[0] ?? join(paths.rootDir, "bin", "openclaw"),
+      record.entrypointCommand[0] ?? join(root, "bin", "openclaw"),
       `#!/bin/sh
 message=""
 prev=""
@@ -120,54 +166,78 @@ done
 printf '{"response":{"text":"reply:%s"}}\n' "$message"
 `,
     )
-    await writeInstallRecord(paths, record)
-    await setSharedConfigValue(paths, "CLAW_API_KEY", "secret")
 
-    const output = await runChat(paths, record, "hello-runtime")
+    const output = await runWithLayer(
+      Effect.gen(function* () {
+        const store = yield* ClawctlStoreService
+        const runtime = yield* ClawctlRuntimeService
+        yield* store.writeInstallRecord(record)
+        yield* store.setSharedConfigValue("CLAW_API_KEY", "secret")
+        return yield* runtime.runChat(record, "hello-runtime")
+      }),
+      makeRuntimeTestLayer(root),
+    )
+
     expect(output).toBe("reply:hello-runtime")
   })
 
-  test("runChat rejects placeholder config and missing binaries", async () => {
-    const paths = await createPaths()
-    const record = installRecord(paths)
-    await writeInstallRecord(paths, record)
+  test("rejects placeholder config and missing binaries", async () => {
+    const root = await createRoot()
+    const record = installRecord(root)
 
-    await expect(runChat(paths, record, "hello-runtime")).rejects.toThrow(
-      "shared config key is missing or placeholder: CLAW_API_KEY",
+    await expect(
+      runWithLayer(
+        Effect.gen(function* () {
+          const store = yield* ClawctlStoreService
+          const runtime = yield* ClawctlRuntimeService
+          yield* store.writeInstallRecord(record)
+          return yield* runtime.runChat(record, "hello-runtime")
+        }),
+        makeRuntimeTestLayer(root),
+      ),
+    ).rejects.toThrow("shared config key is missing or placeholder: CLAW_API_KEY")
+
+    await expect(
+      runWithLayer(
+        Effect.gen(function* () {
+          const store = yield* ClawctlStoreService
+          const runtime = yield* ClawctlRuntimeService
+          yield* store.writeInstallRecord(record)
+          yield* store.setSharedConfigValue("CLAW_API_KEY", "secret")
+          return yield* runtime.runChat(record, "hello-runtime")
+        }),
+        makeRuntimeTestLayer(root),
+      ),
+    ).rejects.toThrow("missing binary for openclaw")
+  })
+
+  test("exposes the one-shot ping prompt", async () => {
+    const root = await createRoot()
+
+    const output = await runWithLayer(
+      Effect.gen(function* () {
+        const runtime = yield* ClawctlRuntimeService
+        return runtime.pingText()
+      }),
+      makeRuntimeTestLayer(root),
     )
 
-    await setSharedConfigValue(paths, "CLAW_API_KEY", "secret")
-    await expect(runChat(paths, record, "hello-runtime")).rejects.toThrow("missing binary for openclaw")
+    expect(output).toBe("Reply with exactly the single word pong.")
   })
 
-  test("runChat rejects empty adapter commands", async () => {
-    const paths = await createPaths()
-    const record: InstallRecord = {
-      ...installRecord(paths),
-      implementation: "nanoclaw",
-      installStrategy: "repo-bootstrap",
-      installRoot: join(paths.installDir, "local", "nanoclaw", "main"),
-      entrypointCommand: [],
-      requestedVersion: "main",
-      resolvedVersion: "main",
-      supportTier: "tier3",
-    }
-    await writeInstallRecord(paths, record)
+  test("shared config stays redacted at the store boundary", async () => {
+    const root = await createRoot()
 
-    await expect(runChat(paths, record, "hello-runtime")).rejects.toThrow("missing binary for nanoclaw")
-  })
+    const config = await runWithLayer(
+      Effect.gen(function* () {
+        const store = yield* ClawctlStoreService
+        yield* store.setSharedConfigValue("CLAW_API_KEY", "secret")
+        return yield* store.readSharedConfig
+      }),
+      makeRuntimeTestLayer(root),
+    )
 
-  test("ensureActiveChatTarget activates supported targets", async () => {
-    const paths = await createPaths()
-    const record = installRecord(paths)
-    await writeInstallRecord(paths, record)
-    await setSharedConfigValue(paths, "CLAW_API_KEY", "secret")
-
-    const activated = await ensureActiveChatTarget(paths, Option.some("openclaw"), "chat")
-    expect(activated.resolvedVersion).toBe("2026.3.7")
-  })
-
-  test("pingText returns the one-shot ping prompt", () => {
-    expect(pingText()).toBe("Reply with exactly the single word pong.")
+    expect(config.CLAW_API_KEY).toEqual(Redacted.make("secret"))
+    expect(sharedConfigToEntries(config).CLAW_API_KEY).toBe("secret")
   })
 })

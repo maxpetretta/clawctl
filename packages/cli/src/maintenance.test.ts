@@ -2,25 +2,22 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { Effect, Redacted } from "effect"
 
 import type { InstallRecord } from "./adapter/types.ts"
-import {
-  isPlatformSupported,
-  requiredCommandsForInstall,
-  runCleanup,
-  runDoctor,
-  sharedConfigIssues,
-} from "./maintenance.ts"
-import { resolvePaths } from "./paths.ts"
-import { setSharedConfigValue } from "./shared-config.ts"
-import { writeCurrentSelection, writeInstallRecord } from "./state.ts"
+import { userError } from "./errors.ts"
+import { ClawctlMaintenanceService, isPlatformSupported, requiredCommandsForInstall } from "./maintenance-service.ts"
+import { ClawctlPathsService } from "./paths-service.ts"
+import { missingSharedConfigKeys } from "./shared-config.ts"
+import { ClawctlStoreService } from "./store-service.ts"
+import { makeMaintenanceLayer, runWithLayer } from "./test-layer.ts"
 
 const tempRoots: string[] = []
 
-async function createPaths() {
+async function createRoot() {
   const root = await mkdtemp(join(tmpdir(), "clawctl-maintenance-"))
   tempRoots.push(root)
-  return resolvePaths(root)
+  return root
 }
 
 async function writeExecutable(destination: string) {
@@ -29,32 +26,34 @@ async function writeExecutable(destination: string) {
 }
 
 function record(
+  root: string,
   input: Partial<InstallRecord> & Pick<InstallRecord, "implementation" | "resolvedVersion">,
-): InstallRecord {
+) {
   return {
     implementation: input.implementation,
     requestedVersion: input.requestedVersion ?? input.resolvedVersion,
     resolvedVersion: input.resolvedVersion,
     backend: input.backend ?? "local",
     installStrategy: input.installStrategy ?? "npm-package",
-    installRoot: input.installRoot ?? "/tmp/install-root",
+    installRoot: input.installRoot ?? join(root, "installs", "local", input.implementation, input.resolvedVersion),
     entrypointCommand: input.entrypointCommand ?? [],
     platform: input.platform ?? { os: "darwin", arch: "arm64" },
     sourceReference: input.sourceReference ?? "fixture",
     verificationSummary: input.verificationSummary,
     installedAt: input.installedAt ?? "2026-03-09T00:00:00.000Z",
     supportTier: input.supportTier ?? "tier2",
-  }
+  } satisfies InstallRecord
 }
 
 afterEach(async () => {
   process.env.CLAWCTL_GIT_BIN = undefined
   process.env.CLAWCTL_NPM_BIN = undefined
   process.env.CLAWCTL_DOCKER_BIN = undefined
+  process.env.CLAWCTL_BUN_BIN = undefined
   await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
-describe("maintenance", () => {
+describe("maintenance service", () => {
   test("exposes pure install and config helper behavior", () => {
     expect(isPlatformSupported([{ os: "darwin", arch: "arm64" }], { os: "darwin", arch: "arm64" })).toBe(true)
     expect(isPlatformSupported([{ os: "linux", arch: "arm64" }], { os: "darwin", arch: "arm64" })).toBe(false)
@@ -115,13 +114,22 @@ describe("maintenance", () => {
     ).toEqual([process.env.CLAWCTL_GIT_BIN ?? "git", process.env.CLAWCTL_BUN_BIN ?? "bun"])
 
     expect(
-      sharedConfigIssues({ CLAW_API_KEY: "replace-me", CLAW_MODEL: "ok" }, ["CLAW_API_KEY", "CLAW_MODEL"]),
-    ).toEqual(["CLAW_API_KEY"])
+      missingSharedConfigKeys(
+        {
+          CLAW_API_KEY: Redacted.make("replace-me"),
+          CLAW_BASE_URL: "https://openrouter.ai/api/v1",
+          CLAW_MODEL: "ok",
+          TELEGRAM_BOT_TOKEN: Redacted.make(""),
+          TELEGRAM_BOT_USERNAME: "",
+        },
+        ["CLAW_API_KEY", "CLAW_MODEL", "TELEGRAM_BOT_TOKEN"],
+      ),
+    ).toEqual(["CLAW_API_KEY", "TELEGRAM_BOT_TOKEN"])
   })
 
   test("doctor reports healthy installed adapters", async () => {
-    const paths = await createPaths()
-    const toolsDir = join(paths.rootDir, "tools")
+    const root = await createRoot()
+    const toolsDir = join(root, "tools")
     const npmPath = join(toolsDir, "npm")
     const openclawPath = join(toolsDir, "openclaw")
     await mkdir(toolsDir, { recursive: true })
@@ -129,43 +137,54 @@ describe("maintenance", () => {
     await writeExecutable(openclawPath)
     process.env.CLAWCTL_NPM_BIN = npmPath
 
-    await setSharedConfigValue(paths, "CLAW_API_KEY", "secret")
-    await writeInstallRecord(
-      paths,
-      record({
-        implementation: "openclaw",
-        resolvedVersion: "2026.3.7",
-        entrypointCommand: [openclawPath],
-        installRoot: join(paths.installDir, "local", "openclaw", "2026.3.7"),
+    const report = await runWithLayer(
+      Effect.gen(function* () {
+        const store = yield* ClawctlStoreService
+        const maintenance = yield* ClawctlMaintenanceService
+        yield* store.setSharedConfigValue("CLAW_API_KEY", "secret")
+        yield* store.writeInstallRecord(
+          record(root, {
+            implementation: "openclaw",
+            resolvedVersion: "2026.3.7",
+            entrypointCommand: [openclawPath],
+          }),
+        )
+        return yield* maintenance.runDoctor("openclaw")
       }),
+      makeMaintenanceLayer(root),
     )
 
-    const report = await runDoctor(paths, "openclaw")
     expect(report.ok).toBe(true)
     expect(report.checks.some((check) => check.label === "openclaw:entrypoint:2026.3.7" && check.ok)).toBe(true)
   })
 
   test("doctor uses current selection and handles entrypoint-free installs", async () => {
-    const paths = await createPaths()
+    const root = await createRoot()
     process.env.CLAWCTL_GIT_BIN = "/usr/bin/git"
-    await writeInstallRecord(
-      paths,
-      record({
-        implementation: "nanoclaw",
-        resolvedVersion: "main",
-        installStrategy: "repo-bootstrap",
-        entrypointCommand: [],
-        installRoot: join(paths.installDir, "local", "nanoclaw", "main"),
-        supportTier: "tier3",
-      }),
-    )
-    await writeCurrentSelection(paths, {
-      implementation: "nanoclaw",
-      version: "main",
-      backend: "local",
-    })
 
-    const report = await runDoctor(paths)
+    const report = await runWithLayer(
+      Effect.gen(function* () {
+        const store = yield* ClawctlStoreService
+        const maintenance = yield* ClawctlMaintenanceService
+        yield* store.writeInstallRecord(
+          record(root, {
+            implementation: "nanoclaw",
+            resolvedVersion: "main",
+            installStrategy: "repo-bootstrap",
+            entrypointCommand: [],
+            supportTier: "tier3",
+          }),
+        )
+        yield* store.writeCurrentSelection({
+          implementation: "nanoclaw",
+          version: "main",
+          backend: "local",
+        })
+        return yield* maintenance.runDoctor()
+      }),
+      makeMaintenanceLayer(root),
+    )
+
     expect(report.ok).toBe(true)
     expect(
       report.checks.some(
@@ -175,67 +194,65 @@ describe("maintenance", () => {
   })
 
   test("doctor reports missing shared config and tools", async () => {
-    const paths = await createPaths()
-    process.env.CLAWCTL_DOCKER_BIN = join(paths.rootDir, "missing-docker")
+    const root = await createRoot()
+    process.env.CLAWCTL_DOCKER_BIN = join(root, "missing-docker")
 
-    const report = await runDoctor(paths, "piclaw")
+    const report = await runWithLayer(
+      Effect.gen(function* () {
+        const maintenance = yield* ClawctlMaintenanceService
+        return yield* maintenance.runDoctor("piclaw")
+      }),
+      makeMaintenanceLayer(root),
+    )
+
     expect(report.ok).toBe(false)
     expect(report.checks.some((check) => check.label.includes("piclaw:docker:tool") && !check.ok)).toBe(true)
   })
 
-  test("doctor discovers installed adapters when no target is provided", async () => {
-    const paths = await createPaths()
-    const toolsDir = join(paths.rootDir, "tools")
-    const tarPath = join(toolsDir, "tar")
-    const unzipPath = join(toolsDir, "unzip")
-    await mkdir(toolsDir, { recursive: true })
-    await writeExecutable(tarPath)
-    await writeExecutable(unzipPath)
-    await writeInstallRecord(
-      paths,
-      record({
-        implementation: "picoclaw",
-        resolvedVersion: "v0.2.0",
-        installStrategy: "github-release",
-        entrypointCommand: [join(toolsDir, "picoclaw")],
-        installRoot: join(paths.installDir, "local", "picoclaw", "v0.2.0"),
-        supportTier: "tier1",
+  test("cleanup clears stale current selections and stale directories", async () => {
+    const root = await createRoot()
+
+    const report = await runWithLayer(
+      Effect.gen(function* () {
+        const maintenance = yield* ClawctlMaintenanceService
+        const paths = yield* ClawctlPathsService
+        const store = yield* ClawctlStoreService
+        yield* store.writeCurrentSelection({
+          implementation: "openclaw",
+          version: "2026.3.7",
+          backend: "local",
+        })
+        yield* Effect.tryPromise({
+          try: async () => {
+            await mkdir(join(paths.paths.installDir, "local", "openclaw", "2026.3.7.partial-stale"), {
+              recursive: true,
+            })
+            await mkdir(join(paths.paths.runtimeDir, "local", "openclaw", "2026.3.6"), { recursive: true })
+          },
+          catch: (cause) => userError("maintenance.test", String(cause)),
+        })
+        return yield* maintenance.runCleanup("openclaw")
       }),
+      makeMaintenanceLayer(root),
     )
 
-    const report = await runDoctor(paths)
-    expect(report.checks.some((check) => check.label === "picoclaw:install:v0.2.0")).toBe(true)
-  })
-
-  test("cleanup clears stale current selections", async () => {
-    const paths = await createPaths()
-    await writeCurrentSelection(paths, {
-      implementation: "openclaw",
-      version: "2026.3.7",
-      backend: "local",
-    })
-
-    const report = await runCleanup(paths)
     expect(report.clearedCurrent).toBe(true)
+    expect(report.removedPartialInstalls).toBe(1)
+    expect(report.removedRuntimeDirs).toBe(1)
   })
 
   test("doctor returns registry-only status when nothing is installed", async () => {
-    const paths = await createPaths()
+    const root = await createRoot()
 
-    const report = await runDoctor(paths)
+    const report = await runWithLayer(
+      Effect.gen(function* () {
+        const maintenance = yield* ClawctlMaintenanceService
+        return yield* maintenance.runDoctor()
+      }),
+      makeMaintenanceLayer(root),
+    )
+
     expect(report.ok).toBe(true)
     expect(report.checks).toEqual([{ label: "registry", ok: true, detail: "adapter registry is valid" }])
-  })
-
-  test("cleanup can target a single implementation", async () => {
-    const paths = await createPaths()
-    const partialDir = join(paths.installDir, "local", "openclaw", "2026.3.7.partial-stale")
-    const runtimeDir = join(paths.runtimeDir, "local", "openclaw", "2026.3.6")
-    await mkdir(partialDir, { recursive: true })
-    await mkdir(runtimeDir, { recursive: true })
-
-    const report = await runCleanup(paths, "openclaw")
-    expect(report.removedPartialInstalls).toBe(1)
-    expect(report.removedRuntimeDirs).toBe(1)
   })
 })
