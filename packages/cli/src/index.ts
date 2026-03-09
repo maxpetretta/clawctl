@@ -9,6 +9,8 @@ import { resolveRuntime, runtimeBackends } from "./model.ts"
 import { maybeRunManagedDaemon, maybeRunShimmedCommand } from "./runtime-service.ts"
 import { ClawctlLive, ClawctlService } from "./service.ts"
 
+const version = "v2026.3.8"
+
 const runtimeOption = Options.choice("runtime", runtimeBackends).pipe(
   Options.optional,
   Options.withDescription("Runtime backend to use. Only `local` is implemented today."),
@@ -38,9 +40,9 @@ const optionalShell = Args.text({ name: "shell" }).pipe(
   Args.withDescription("Optional shell target. Defaults to the current SHELL when omitted."),
 )
 
-const rootCommand = Command.make("clawctl", {}, () =>
-  Effect.flatMap(Terminal.Terminal, (terminal) => terminal.display("Use a subcommand. Try clawctl --help.\n")),
-).pipe(Command.withDescription("Install, switch, and run supported claw implementations."))
+const rootCommand = Command.make("clawctl", {}, () => Effect.void).pipe(
+  Command.withDescription("Install, switch, and run supported claw implementations."),
+)
 
 const installCommand = Command.make(
   "install",
@@ -137,7 +139,7 @@ const command = rootCommand.pipe(
 
 const cli = Command.run(command, {
   name: "clawctl",
-  version: "v2026.3.8",
+  version,
   summary: Span.text("Install, switch, and run supported claw implementations."),
   footer: HelpDoc.blocks([
     HelpDoc.h2("Examples"),
@@ -161,31 +163,74 @@ const MainLayer = ClawctlLive.pipe(
   ),
 )
 
+const rootHelpCommands = [
+  ["install", "Download and install a claw into the local clawctl store."],
+  ["uninstall", "Remove one installed version, or all installed versions, of a claw."],
+  ["use", "Set the active claw, installing it first if needed."],
+  ["current", "Show the currently active claw selection."],
+  ["cleanup", "Remove stale partial installs, orphaned runtimes, and invalid current selections."],
+  ["init", "Append clawctl PATH setup to your shell config for bash, zsh, or fish."],
+  ["list", "List supported claws or only the versions installed locally."],
+  ["versions", "List installable remote versions for a claw."],
+  ["doctor", "Run adapter, toolchain, config, and install checks."],
+  ["status", "Show install and runtime metadata for a claw."],
+  ["ping", "Send the built-in ping prompt to a claw and print the response."],
+  ["chat", "Send a message to a managed claw runtime and print the reply."],
+  ["stop", "Stop a claw runtime when the selected backend supports resident processes."],
+  ["config", "Read or update shared clawctl configuration."],
+] as const
+
+function formatHelpRows(rows: ReadonlyArray<readonly [string, string]>): string[] {
+  const nameWidth = rows.reduce((width, [name]) => Math.max(width, name.length), 0)
+  return rows.map(([name, description]) => `  ${name.padEnd(nameWidth)}  ${description}`)
+}
+
+function renderRootHelp(): string {
+  return [
+    `clawctl ${version}`,
+    "Install, switch, and run supported claw implementations.",
+    "",
+    "Usage:",
+    "  clawctl <command> [options]",
+    "",
+    "Commands:",
+    ...formatHelpRows(rootHelpCommands),
+    "",
+    "Examples:",
+    "  clawctl install openclaw",
+    "  clawctl use openclaw@2026.3.7",
+    '  clawctl chat "hello"',
+    "  clawctl doctor",
+    "",
+    "Run 'clawctl <command> --help' for more information on a command.",
+  ].join("\n")
+}
+
+const displayErrorAndExit = (message: string) =>
+  Effect.flatMap(Terminal.Terminal, (terminal) =>
+    terminal.display(`${message}\n`).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          process.exitCode = 1
+        }),
+      ),
+    ),
+  )
+
 const handledDaemon = await maybeRunManagedDaemon(process.argv)
 const handledShim = handledDaemon ? false : await maybeRunShimmedCommand(process.argv)
 if (!(handledDaemon || handledShim)) {
-  cli(process.argv).pipe(
+  const userArgs = process.argv.slice(2)
+  if (userArgs.length === 0 || (userArgs.length === 1 && (userArgs[0] === "--help" || userArgs[0] === "-h"))) {
+    process.stdout.write(renderRootHelp())
+    process.exit(0)
+  }
+
+  const argv = process.argv
+  cli(argv).pipe(
     Effect.catchTags({
-      ClawctlSystemError: (error) =>
-        Effect.flatMap(Terminal.Terminal, (terminal) =>
-          terminal.display(`${error.message}\n`).pipe(
-            Effect.tap(() =>
-              Effect.sync(() => {
-                process.exitCode = 1
-              }),
-            ),
-          ),
-        ),
-      ClawctlUserError: (error) =>
-        Effect.flatMap(Terminal.Terminal, (terminal) =>
-          terminal.display(`${error.message}\n`).pipe(
-            Effect.tap(() =>
-              Effect.sync(() => {
-                process.exitCode = 1
-              }),
-            ),
-          ),
-        ),
+      ClawctlSystemError: (error) => displayErrorAndExit(error.message),
+      ClawctlUserError: (error) => displayErrorAndExit(error.message),
     }),
     Effect.provide(MainLayer),
     BunRuntime.runMain,
