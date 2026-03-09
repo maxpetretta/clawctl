@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { parseTargetReference } from "./target.ts"
+import { parseTargetReference } from "../target.ts"
 
 describe("parseTargetReference", () => {
   test("parses implementation without a version", () => {

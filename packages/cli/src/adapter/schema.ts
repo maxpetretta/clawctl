@@ -24,9 +24,9 @@ export const backendKinds = ["local", "docker"] as const
 
 export type BackendKind = (typeof backendKinds)[number]
 
-export const runtimeModes = ["oneshot", "daemon", "http", "telegram-bot", "external"] as const
+export const supervisionKinds = ["proxy", "native-daemon", "unmanaged"] as const
 
-export type RuntimeMode = (typeof runtimeModes)[number]
+export type SupervisionKind = (typeof supervisionKinds)[number]
 
 export const homeStrategies = ["isolated-home", "native-home", "custom-env"] as const
 
@@ -234,7 +234,9 @@ export type RuntimePingConfig =
   | AdapterHookReference
 
 export type RuntimeManifest = {
-  mode: RuntimeMode
+  supervision: {
+    kind: SupervisionKind
+  }
   homeStrategy: HomeStrategy
   workspaceStrategy: WorkspaceStrategy
   entrypoint: RuntimeEntrypoint
@@ -288,7 +290,6 @@ export type CapabilityManifest = {
   telegram: boolean
   local: boolean
   docker: boolean
-  oneshot: boolean
   daemon: boolean
 }
 

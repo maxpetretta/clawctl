@@ -4,13 +4,13 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect, Redacted } from "effect"
 
-import type { InstallRecord } from "./adapter/types.ts"
-import { userError } from "./errors.ts"
-import { ClawctlMaintenanceService, isPlatformSupported, requiredCommandsForInstall } from "./maintenance-service.ts"
-import { ClawctlPathsService } from "./paths-service.ts"
-import { missingSharedConfigKeys } from "./shared-config.ts"
-import { ClawctlStoreService } from "./store-service.ts"
-import { makeMaintenanceLayer, runWithLayer } from "./test-layer.ts"
+import type { InstallRecord } from "../adapter/types.ts"
+import { userError } from "../errors.ts"
+import { ClawctlMaintenanceService, isPlatformSupported, requiredCommandsForInstall } from "../maintenance-service.ts"
+import { ClawctlPathsService } from "../paths-service.ts"
+import { missingSharedConfigKeys } from "../shared-config.ts"
+import { ClawctlStoreService } from "../store-service.ts"
+import { makeMaintenanceLayer, runWithLayer } from "../test-layer.ts"
 
 const tempRoots: string[] = []
 

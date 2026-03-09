@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
 
-import { getBackendManifest, getRegisteredImplementation, listRegisteredImplementations } from "./registry.ts"
-import type { InstallManifest, RuntimeManifest } from "./schema.ts"
-import { validateAdapterRegistration, validateAdapterRegistry } from "./validate.ts"
+import { getBackendManifest, getRegisteredImplementation, listRegisteredImplementations } from "../registry.ts"
+import type { InstallManifest, RuntimeManifest } from "../schema.ts"
+import { validateAdapterRegistration, validateAdapterRegistry } from "../validate.ts"
 
 const config = {
   CLAW_API_KEY: "secret",
@@ -11,6 +11,13 @@ const config = {
 }
 
 describe("adapter registry", () => {
+  const runtimeInput = {
+    homeDir: "/tmp/home",
+    runtimeDir: "/tmp/runtime",
+    stateDir: "/tmp/runtime/state",
+    workspaceDir: "/tmp/workspace",
+  }
+
   test("lists the supported adapters and validates the registry", () => {
     expect(listRegisteredImplementations().map((entry) => entry.manifest.id)).toEqual([
       "nullclaw",
@@ -20,6 +27,7 @@ describe("adapter registry", () => {
       "nanobot",
       "nanoclaw",
       "bitclaw",
+      "ironclaw",
       "piclaw",
     ])
     expect(() => validateAdapterRegistry()).not.toThrow()
@@ -38,27 +46,21 @@ describe("adapter registry", () => {
     const openclaw = getRegisteredImplementation("openclaw")
     const nanobot = getRegisteredImplementation("nanobot")
 
-    expect(nullclaw.implementationHooks.buildChatCommand({ binaryPath: "/bin/nullclaw", message: "hi" })).toEqual([
-      "/bin/nullclaw",
-      "agent",
-      "-m",
-      "hi",
-    ])
-    expect(picoclaw.implementationHooks.buildChatCommand({ binaryPath: "/bin/picoclaw", message: "hi" })).toContain(
-      "--session",
-    )
-    expect(zeroclaw.implementationHooks.buildChatCommand({ binaryPath: "/bin/zeroclaw", message: "hi" })).toEqual([
-      "/bin/zeroclaw",
-      "agent",
-      "-m",
-      "hi",
-    ])
-    expect(openclaw.implementationHooks.buildChatCommand({ binaryPath: "/bin/openclaw", message: "hi" })).toContain(
-      "--json",
-    )
-    expect(nanobot.implementationHooks.buildChatCommand({ binaryPath: "/bin/nanobot", message: "hi" })).toContain(
-      "--no-logs",
-    )
+    expect(
+      nullclaw.implementationHooks.buildChatCommand({ binaryPath: "/bin/nullclaw", message: "hi", ...runtimeInput }),
+    ).toEqual(["/bin/nullclaw", "agent", "-m", "hi"])
+    expect(
+      picoclaw.implementationHooks.buildChatCommand({ binaryPath: "/bin/picoclaw", message: "hi", ...runtimeInput }),
+    ).toContain("--session")
+    expect(
+      zeroclaw.implementationHooks.buildChatCommand({ binaryPath: "/bin/zeroclaw", message: "hi", ...runtimeInput }),
+    ).toEqual(["/bin/zeroclaw", "agent", "-m", "hi"])
+    expect(
+      openclaw.implementationHooks.buildChatCommand({ binaryPath: "/bin/openclaw", message: "hi", ...runtimeInput }),
+    ).toContain("--json")
+    expect(
+      nanobot.implementationHooks.buildChatCommand({ binaryPath: "/bin/nanobot", message: "hi", ...runtimeInput }),
+    ).toContain("--no-logs")
 
     const nullFiles = await nullclaw.implementationHooks.renderConfig({ config, workspaceDir: "/tmp/workspace" })
     const picoFiles = await picoclaw.implementationHooks.renderConfig({ config, workspaceDir: "/tmp/workspace" })
@@ -74,9 +76,7 @@ describe("adapter registry", () => {
 
     expect(
       nullclaw.implementationHooks.runtimeEnv({
-        homeDir: "/tmp/home",
-        runtimeDir: "/tmp/runtime",
-        workspaceDir: "/tmp/workspace",
+        ...runtimeInput,
       }),
     ).toEqual({
       HOME: "/tmp/home",
@@ -85,9 +85,7 @@ describe("adapter registry", () => {
     })
     expect(
       picoclaw.implementationHooks.runtimeEnv({
-        homeDir: "/tmp/home",
-        runtimeDir: "/tmp/runtime",
-        workspaceDir: "/tmp/workspace",
+        ...runtimeInput,
       }),
     ).toEqual({
       HOME: "/tmp/home",
@@ -95,18 +93,14 @@ describe("adapter registry", () => {
     })
     expect(
       zeroclaw.implementationHooks.runtimeEnv({
-        homeDir: "/tmp/home",
-        runtimeDir: "/tmp/runtime",
-        workspaceDir: "/tmp/workspace",
+        ...runtimeInput,
       }),
     ).toEqual({
       HOME: "/tmp/home",
     })
     expect(
       openclaw.implementationHooks.runtimeEnv({
-        homeDir: "/tmp/home",
-        runtimeDir: "/tmp/runtime",
-        workspaceDir: "/tmp/workspace",
+        ...runtimeInput,
       }),
     ).toEqual({
       HOME: "/tmp/home",
@@ -119,9 +113,7 @@ describe("adapter registry", () => {
     })
     expect(
       nanobot.implementationHooks.runtimeEnv({
-        homeDir: "/tmp/home",
-        runtimeDir: "/tmp/runtime",
-        workspaceDir: "/tmp/workspace",
+        ...runtimeInput,
       }),
     ).toEqual({
       HOME: "/tmp/home",
@@ -133,6 +125,7 @@ describe("adapter registry", () => {
     const openclaw = getRegisteredImplementation("openclaw")
     const nanoclaw = getRegisteredImplementation("nanoclaw")
     const bitclaw = getRegisteredImplementation("bitclaw")
+    const ironclaw = getRegisteredImplementation("ironclaw")
     const piclaw = getRegisteredImplementation("piclaw")
 
     expect(
@@ -155,9 +148,14 @@ describe("adapter registry", () => {
       openclaw.implementationHooks.normalizeChatOutput?.({ stdout: '{"noop":true}', stderr: "bad" }),
     ).toThrow("openclaw did not return chat text: bad")
 
-    expect(nanoclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi" })).toEqual([])
-    expect(bitclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi" })).toEqual([])
-    expect(piclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi" })).toEqual([])
+    expect(nanoclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi", ...runtimeInput })).toEqual(
+      [],
+    )
+    expect(bitclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi", ...runtimeInput })).toEqual([])
+    expect(ironclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi", ...runtimeInput })).toEqual(
+      [],
+    )
+    expect(piclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi", ...runtimeInput })).toEqual([])
     expect(nanoclaw.manifest.backends[0]?.install[0]?.versionSource).toEqual({
       kind: "adapter-hook",
       hook: "resolveVersions",
@@ -167,11 +165,16 @@ describe("adapter registry", () => {
       repository: "https://github.com/rcarmo/piclaw.git",
     })
     expect(nanoclaw.implementationHooks.resolveVersions).toBeDefined()
+    expect(ironclaw.manifest.backends[0]?.install[0]).toMatchObject({
+      strategy: "github-release",
+      repository: "nearai/ironclaw",
+      versionSource: { kind: "github-releases", repository: "nearai/ironclaw" },
+    })
   })
 
   test("validates invalid adapter registrations", () => {
     const localRuntime: RuntimeManifest = {
-      mode: "oneshot",
+      supervision: { kind: "proxy" },
       homeStrategy: "isolated-home",
       workspaceStrategy: "per-runtime",
       entrypoint: { kind: "exec", command: ["tool"] },
@@ -240,13 +243,22 @@ describe("adapter registry", () => {
               install,
               runtime: {
                 ...localRuntime,
-                mode: "external",
+                supervision: { kind: "unmanaged" },
               },
             },
           ],
         },
       }),
-    ).toThrow("adapter ghostclaw cannot declare chat or ping with external runtime mode")
+    ).toThrow("adapter ghostclaw cannot declare chat or ping with unmanaged supervision")
+
+    expect(() =>
+      validateAdapterRegistration({
+        manifest: {
+          ...base.manifest,
+          id: "ghostclaw",
+        },
+      }),
+    ).toThrow("adapter ghostclaw native-daemon supervision requires a start hook")
 
     const seenIds = new Set(["openclaw"])
     expect(() => validateAdapterRegistration(base, seenIds)).toThrow("duplicate adapter id: openclaw")

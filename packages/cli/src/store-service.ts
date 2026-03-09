@@ -1,14 +1,16 @@
 import * as FileSystem from "@effect/platform/FileSystem"
 import { Context, Effect, Layer } from "effect"
 
-import type { CurrentSelection, InstallRecord } from "./adapter/types.ts"
+import type { CurrentSelection, InstallRecord, RuntimeRecord } from "./adapter/types.ts"
 import { type ClawctlError, type ClawctlSystemError, userError, withSystemError } from "./errors.ts"
 import { ClawctlPathsService } from "./paths-service.ts"
 import {
   parseCurrentSelectionJson,
   parseInstallRecordJson,
+  parseRuntimeRecordJson,
   stringifyCurrentSelectionJson,
   stringifyInstallRecordJson,
+  stringifyRuntimeRecordJson,
 } from "./record-schema.ts"
 import {
   defaultSharedConfig,
@@ -30,6 +32,17 @@ type ClawctlStoreApi = {
   readonly readCurrentSelection: Effect.Effect<CurrentSelection | undefined, ClawctlSystemError>
   readonly writeCurrentSelection: (selection: CurrentSelection) => Effect.Effect<void, ClawctlSystemError>
   readonly writeInstallRecord: (record: InstallRecord) => Effect.Effect<void, ClawctlSystemError>
+  readonly readRuntimeRecord: (
+    implementation: string,
+    version: string,
+    backend?: string,
+  ) => Effect.Effect<RuntimeRecord | undefined, ClawctlSystemError>
+  readonly writeRuntimeRecord: (record: RuntimeRecord) => Effect.Effect<void, ClawctlSystemError>
+  readonly clearRuntimeRecord: (
+    implementation: string,
+    version: string,
+    backend?: string,
+  ) => Effect.Effect<void, ClawctlSystemError>
   readonly clearCurrentSelection: Effect.Effect<void, ClawctlSystemError>
   readonly cleanupPartialInstallDirectories: (
     implementation: string,
@@ -60,8 +73,16 @@ export const ClawctlStoreLive = Layer.effect(
   ClawctlStoreService,
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem
-    const { paths, path, installMetadataFile, installParentDir, installRoot, runtimeImplementationDir, runtimeRoot } =
-      yield* ClawctlPathsService
+    const {
+      paths,
+      path,
+      installMetadataFile,
+      installParentDir,
+      installRoot,
+      runtimeImplementationDir,
+      runtimeMetadataFile,
+      runtimeRoot,
+    } = yield* ClawctlPathsService
 
     const ensureSharedConfig = withSystemError(
       "store.ensureSharedConfig",
@@ -205,6 +226,50 @@ export const ClawctlStoreLive = Layer.effect(
         ),
       )
     })
+    const readRuntimeRecord = Effect.fn("ClawctlStoreService.readRuntimeRecord")(function* (
+      implementation: string,
+      version: string,
+      backend = "local",
+    ) {
+      const file = runtimeMetadataFile(implementation, version, backend)
+      const exists = yield* withSystemError("store.runtimeRecordExists", fs.exists(file))
+      if (!exists) {
+        return undefined
+      }
+      const source = yield* withSystemError("store.readRuntimeRecord", fs.readFileString(file))
+      return yield* Effect.try({
+        try: () => parseRuntimeRecordJson(source) as RuntimeRecord,
+        catch: () => undefined,
+      }).pipe(
+        Effect.match({
+          onFailure: () => undefined,
+          onSuccess: (record) => record,
+        }),
+      )
+    })
+    const writeRuntimeRecord = Effect.fn("ClawctlStoreService.writeRuntimeRecord")(function* (record: RuntimeRecord) {
+      const root = runtimeRoot(record.implementation, record.version, record.backend)
+      yield* withSystemError("store.makeRuntimeRoot", fs.makeDirectory(root, { recursive: true }))
+      yield* withSystemError(
+        "store.writeRuntimeRecord",
+        fs.writeFileString(
+          runtimeMetadataFile(record.implementation, record.version, record.backend),
+          stringifyRuntimeRecordJson(record),
+        ),
+      )
+    })
+    const clearRuntimeRecord = Effect.fn("ClawctlStoreService.clearRuntimeRecord")(function* (
+      implementation: string,
+      version: string,
+      backend = "local",
+    ) {
+      const file = runtimeMetadataFile(implementation, version, backend)
+      const exists = yield* withSystemError("store.runtimeRecordExists", fs.exists(file))
+      if (!exists) {
+        return
+      }
+      yield* withSystemError("store.clearRuntimeRecord", fs.remove(file, { force: true }))
+    })
     const clearCurrentSelection = withSystemError(
       "store.clearCurrentSelection",
       Effect.gen(function* () {
@@ -302,6 +367,9 @@ export const ClawctlStoreLive = Layer.effect(
       readCurrentSelection,
       writeCurrentSelection,
       writeInstallRecord,
+      readRuntimeRecord,
+      writeRuntimeRecord,
+      clearRuntimeRecord,
       clearCurrentSelection,
       cleanupPartialInstallDirectories,
       removeInstall,

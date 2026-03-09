@@ -4,11 +4,11 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
 
-import type { InstallRecord } from "./adapter/types.ts"
-import { userError } from "./errors.ts"
-import { ClawctlPathsService } from "./paths-service.ts"
-import { ClawctlStoreService } from "./store-service.ts"
-import { makeStoreTestLayer, runWithLayer } from "./test-layer.ts"
+import type { InstallRecord } from "../adapter/types.ts"
+import { userError } from "../errors.ts"
+import { ClawctlPathsService } from "../paths-service.ts"
+import { ClawctlStoreService } from "../store-service.ts"
+import { makeStoreTestLayer, runWithLayer } from "../test-layer.ts"
 
 const tempRoots: string[] = []
 

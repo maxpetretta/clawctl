@@ -21,7 +21,15 @@ export type RuntimeRecord = {
   backend: BackendKind
   runtimeRoot: string
   active: boolean
+  managedByClawctl: boolean
+  pid?: number
+  port?: number
+  proxyMode: "proxy" | "native-daemon"
+  state: "starting" | "running" | "stopped" | "failed"
   startedAt?: string
+  stoppedAt?: string
+  updatedAt: string
+  lastError?: string
 }
 
 export type CurrentSelection = {

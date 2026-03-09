@@ -48,6 +48,13 @@ function printStatus(
   record: InstallRecord,
   active: boolean,
   registration: RegisteredImplementation,
+  runtimeState: {
+    active: boolean
+    managedByClawctl: boolean
+    pid?: number
+    port?: number
+    state: string
+  },
 ): Effect.Effect<void, ClawctlError> {
   const runtime = registration.manifest.backends.find((backend) => backend.kind === record.backend)?.runtime
   return EffectRuntime.gen(function* () {
@@ -55,10 +62,16 @@ function printStatus(
     yield* writeLine(`  backend: ${record.backend}`)
     yield* writeLine("  installed: yes")
     yield* writeLine(`  active: ${active ? "yes" : "no"}`)
-    yield* writeLine(`  mode: ${runtime?.mode ?? "unknown"}`)
+    yield* writeLine(`  supervision: ${runtime?.supervision.kind ?? "unknown"}`)
     yield* writeLine(`  chat: ${registration.manifest.capabilities.chat ? "yes" : "no"}`)
     yield* writeLine(`  ping: ${registration.manifest.capabilities.ping ? "yes" : "no"}`)
-    yield* writeLine(`  state: ${registration.manifest.capabilities.chat ? "idle" : "install-only"}`)
+    yield* writeLine(`  state: ${registration.manifest.capabilities.chat ? runtimeState.state : "install-only"}`)
+    if (runtimeState.pid !== undefined) {
+      yield* writeLine(`  pid: ${runtimeState.pid}`)
+    }
+    if (runtimeState.port !== undefined) {
+      yield* writeLine(`  port: ${runtimeState.port}`)
+    }
   })
 }
 
@@ -112,7 +125,7 @@ const clawctlServiceLayer = Layer.effect(
       implementation: string,
     ) {
       const registration = yield* resolveRegistration(implementation)
-      return registration.manifest.capabilities.chat || registration.manifest.capabilities.daemon
+      return registration.manifest.capabilities.chat
     })
     const requireLocalRuntime = (runtime: string) =>
       runtime === "local"
@@ -124,7 +137,7 @@ const clawctlServiceLayer = Layer.effect(
       target: Option.Option<string>
     }) {
       const installRecord = yield* runtime.ensureActiveChatTarget(input.target, "chat")
-      const response = yield* runtime.runChat(installRecord, input.message)
+      const response = yield* runtime.requestChat(installRecord, input.message)
       yield* writeLine(response)
     })
 
@@ -224,7 +237,7 @@ const clawctlServiceLayer = Layer.effect(
 
     const ping = EffectRuntime.fn("ClawctlService.ping")(function* (input: { target: Option.Option<string> }) {
       const installRecord = yield* runtime.ensureActiveChatTarget(input.target, "ping")
-      const response = yield* runtime.runChat(installRecord, runtime.pingText())
+      const response = yield* runtime.requestChat(installRecord, runtime.pingText())
       yield* writeLine(response)
     })
 
@@ -238,7 +251,7 @@ const clawctlServiceLayer = Layer.effect(
           currentSelection &&
           currentSelection.implementation === record.implementation &&
           currentSelection.version === record.resolvedVersion
-        yield* printStatus(writeLine, record, Boolean(active), registration)
+        yield* printStatus(writeLine, record, Boolean(active), registration, yield* runtime.runtimeState(record))
         return
       }
 
@@ -249,7 +262,7 @@ const clawctlServiceLayer = Layer.effect(
 
       const record = yield* store.resolveInstalledRecord(currentSelection.implementation, currentSelection.version)
       const registration = yield* resolveRegistration(record.implementation)
-      yield* printStatus(writeLine, record, true, registration)
+      yield* printStatus(writeLine, record, true, registration, yield* runtime.runtimeState(record))
     })
 
     const stop = EffectRuntime.fn("ClawctlService.stop")(function* (input: {
@@ -257,11 +270,16 @@ const clawctlServiceLayer = Layer.effect(
       target: Option.Option<string>
     }) {
       yield* requireLocalRuntime(input.runtime)
-      const reference = Option.match(input.target, {
-        onNone: () => "active claw",
-        onSome: (value) => value,
-      })
-      yield* writeLine(`stop: no resident runtime for ${reference}`)
+      const result = yield* runtime.stopSelection(input.target)
+      if (!result.record) {
+        yield* writeLine("stop: no active claw")
+        return
+      }
+      yield* writeLine(
+        result.stopped
+          ? `stopped ${result.record.implementation}@${result.record.resolvedVersion}`
+          : `stop: runtime already stopped for ${result.record.implementation}@${result.record.resolvedVersion}`,
+      )
     })
 
     const uninstall = EffectRuntime.fn("ClawctlService.uninstall")(function* (input: {
@@ -295,6 +313,9 @@ const clawctlServiceLayer = Layer.effect(
       }
 
       for (const record of records) {
+        yield* runtime
+          .stopSelection(Option.some(`${record.implementation}@${record.resolvedVersion}`))
+          .pipe(EffectRuntime.catchAll(() => EffectRuntime.void))
         yield* store.removeRuntime(record.implementation, record.resolvedVersion, record.backend)
         yield* store.removeInstall(record)
       }

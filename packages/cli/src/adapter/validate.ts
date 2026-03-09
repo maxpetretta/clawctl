@@ -4,6 +4,14 @@ import type { RegisteredImplementation } from "./types.ts"
 
 export function validateAdapterRegistration(registration: RegisteredImplementation, seenIds = new Set<string>()): void {
   const { manifest } = registration
+  const implementationHooks = (
+    registration as {
+      implementationHooks?: {
+        start?: unknown
+        status?: unknown
+      }
+    }
+  ).implementationHooks
 
   if (seenIds.has(manifest.id)) {
     throw new Error(`duplicate adapter id: ${manifest.id}`)
@@ -23,8 +31,20 @@ export function validateAdapterRegistration(registration: RegisteredImplementati
       throw new Error(`adapter ${manifest.id} backend ${backend.kind} has no install strategies`)
     }
 
-    if (backend.runtime.mode === "external" && (manifest.capabilities.chat || manifest.capabilities.ping)) {
-      throw new Error(`adapter ${manifest.id} cannot declare chat or ping with external runtime mode`)
+    if (
+      backend.runtime.supervision.kind === "unmanaged" &&
+      (manifest.capabilities.chat || manifest.capabilities.ping)
+    ) {
+      throw new Error(`adapter ${manifest.id} cannot declare chat or ping with unmanaged supervision`)
+    }
+
+    if (backend.runtime.supervision.kind === "native-daemon") {
+      if (!implementationHooks?.start) {
+        throw new Error(`adapter ${manifest.id} native-daemon supervision requires a start hook`)
+      }
+      if (!implementationHooks?.status) {
+        throw new Error(`adapter ${manifest.id} native-daemon supervision requires a status hook`)
+      }
     }
   }
 }

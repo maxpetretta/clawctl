@@ -10,7 +10,7 @@ import {
   gitExecutable,
   npmExecutable,
   uvExecutable,
-} from "./tooling.ts"
+} from "../tooling.ts"
 
 describe("commandExists", () => {
   test("returns true for a real command on PATH", async () => {

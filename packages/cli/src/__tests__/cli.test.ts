@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { execFile } from "node:child_process"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { createServer, type Server } from "node:http"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -22,6 +22,7 @@ let fakeGitPath = ""
 let fakeNpmPath = ""
 let fakeUvPath = ""
 let server: Server | undefined
+const tempRoots = new Set<string>()
 
 async function createResponseScript(
   destination: string,
@@ -131,6 +132,12 @@ async function createGithubFixtures(): Promise<void> {
     contentType: "text/plain",
     data: await createChecksumFile("zeroclaw-aarch64-apple-darwin.tar.gz", zeroclawArchive, "SHA256SUMS"),
   })
+
+  const ironclawArchive = await createTarGz("ironclaw")
+  assetMap.set("/downloads/ironclaw/ironclaw-aarch64-apple-darwin.tar.gz", {
+    contentType: "application/gzip",
+    data: ironclawArchive,
+  })
 }
 
 async function createFakeInstallers(root: string): Promise<void> {
@@ -192,6 +199,24 @@ if [ "$1" = "install" ]; then
     openclaw@*)
       cat > "$prefix/node_modules/.bin/openclaw" <<'EOF'
 #!/bin/sh
+if [ "$1" = "gateway" ] && [ "$2" = "run" ]; then
+  mkdir -p "\${OPENCLAW_STATE_DIR}"
+  touch "\${OPENCLAW_STATE_DIR}/ready"
+  trap 'rm -f "\${OPENCLAW_STATE_DIR}/ready"; exit 0' TERM INT
+  while true; do
+    sleep 1
+  done
+fi
+
+if [ "$1" = "gateway" ] && [ "$2" = "health" ]; then
+  if [ -f "\${OPENCLAW_STATE_DIR}/ready" ]; then
+    echo '{"state":"running"}'
+    exit 0
+  fi
+  echo '{"state":"starting"}' >&2
+  exit 1
+fi
+
 message=""
 last=""
 prev=""
@@ -361,7 +386,44 @@ exit 0
 }
 
 function createTempRoot(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "clawctl-root-"))
+  return mkdtemp(join(tmpdir(), "clawctl-root-")).then((root) => {
+    tempRoots.add(root)
+    return root
+  })
+}
+
+async function stopManagedProcesses(root: string): Promise<void> {
+  const runtimeRoot = join(root, "runtimes", "local")
+  try {
+    const implementations = await readdir(runtimeRoot)
+    for (const implementation of implementations) {
+      const implementationDir = join(runtimeRoot, implementation)
+      const versions = await readdir(implementationDir)
+      for (const version of versions) {
+        const metadataPath = join(implementationDir, version, "runtime.json")
+        try {
+          const parsed = JSON.parse(await readFile(metadataPath, "utf8")) as { pid?: number }
+          if (typeof parsed.pid === "number") {
+            try {
+              process.kill(parsed.pid, "SIGTERM")
+            } catch {
+              // Ignore cleanup races with already-exited processes.
+            }
+          }
+        } catch {
+          // Ignore malformed or missing runtime metadata during cleanup.
+        }
+      }
+    }
+  } catch {
+    // Ignore missing runtime directories during cleanup.
+  }
+}
+
+async function cleanupRoot(root: string): Promise<void> {
+  tempRoots.delete(root)
+  await stopManagedProcesses(root)
+  await rm(root, { recursive: true, force: true })
 }
 
 async function runCli(root: string, args: string[]): Promise<string> {
@@ -491,6 +553,44 @@ beforeAll(async () => {
       return
     }
 
+    if (path === "/repos/nearai/ironclaw/releases/tags/v0.9.0") {
+      response.setHeader("content-type", "application/json")
+      response.end(
+        JSON.stringify({
+          tag_name: "v0.9.0",
+          assets: [
+            {
+              name: "ironclaw-aarch64-apple-darwin.tar.gz",
+              browser_download_url: `${apiOrigin}/downloads/ironclaw/ironclaw-aarch64-apple-darwin.tar.gz`,
+            },
+          ],
+        }),
+      )
+      return
+    }
+
+    if (path === "/repos/nearai/ironclaw/releases/latest") {
+      response.setHeader("content-type", "application/json")
+      response.end(
+        JSON.stringify({
+          tag_name: "v0.9.0",
+          assets: [
+            {
+              name: "ironclaw-aarch64-apple-darwin.tar.gz",
+              browser_download_url: `${apiOrigin}/downloads/ironclaw/ironclaw-aarch64-apple-darwin.tar.gz`,
+            },
+          ],
+        }),
+      )
+      return
+    }
+
+    if (path === "/repos/nearai/ironclaw/releases") {
+      response.setHeader("content-type", "application/json")
+      response.end(JSON.stringify([{ tag_name: "v0.9.0" }, { tag_name: "v0.8.9" }]))
+      return
+    }
+
     if (path === "/pypi/nanobot-ai/json") {
       response.setHeader("content-type", "application/json")
       response.end(
@@ -547,6 +647,9 @@ afterAll(async () => {
       })
     })
   }
+  for (const root of [...tempRoots]) {
+    await cleanupRoot(root)
+  }
   await rm(supportRoot, { recursive: true, force: true })
 })
 
@@ -558,7 +661,7 @@ describe("tier 1 clawctl cli", () => {
       expect(output).toContain("ok: registry: adapter registry is valid")
       expect(output).toContain("doctor: ok")
     } finally {
-      await rm(root, { recursive: true, force: true })
+      await cleanupRoot(root)
     }
   })
 
@@ -587,9 +690,9 @@ describe("tier 1 clawctl cli", () => {
       expect(chatOutput).toBe("reply:hello-world")
 
       const statusOutput = await runCli(root, ["status"])
-      expect(statusOutput).toContain("mode: oneshot")
+      expect(statusOutput).toContain("supervision: proxy")
     } finally {
-      await rm(root, { recursive: true, force: true })
+      await cleanupRoot(root)
     }
   })
 
@@ -612,7 +715,7 @@ describe("tier 1 clawctl cli", () => {
       expect(await Bun.file(join(root, "runtimes", "local", "nullclaw", "v2026.3.7")).exists()).toBe(false)
       expect(await runCli(root, ["current"])).toBe("no active claw")
     } finally {
-      await rm(root, { recursive: true, force: true })
+      await cleanupRoot(root)
     }
   })
 
@@ -633,7 +736,41 @@ describe("tier 1 clawctl cli", () => {
       const currentOutput = await runCli(root, ["current"])
       expect(currentOutput).toContain("openclaw@2026.3.7")
     } finally {
-      await rm(root, { recursive: true, force: true })
+      await cleanupRoot(root)
+    }
+  })
+
+  test("use starts a managed runtime, stop stops it, and switching claws stops the previous runtime", async () => {
+    const root = await createTempRoot()
+    try {
+      await seedSharedConfig(root)
+      await runCli(root, ["install", "nullclaw@v2026.3.7"])
+      await runCli(root, ["install", "picoclaw@v0.2.0"])
+
+      const firstUse = await runCli(root, ["use", "nullclaw@v2026.3.7"])
+      expect(firstUse).toContain("using nullclaw@v2026.3.7")
+
+      const firstStatus = await runCli(root, ["status"])
+      expect(firstStatus).toContain("state: running")
+      expect(firstStatus).toContain("pid:")
+
+      const stopOutput = await runCli(root, ["stop"])
+      expect(stopOutput).toBe("stopped nullclaw@v2026.3.7")
+
+      const stoppedStatus = await runCli(root, ["status", "nullclaw@v2026.3.7"])
+      expect(stoppedStatus).toContain("state: stopped")
+
+      const secondUse = await runCli(root, ["use", "picoclaw@v0.2.0"])
+      expect(secondUse).toContain("using picoclaw@v0.2.0")
+
+      const newStatus = await runCli(root, ["status"])
+      expect(newStatus).toContain("picoclaw@v0.2.0")
+      expect(newStatus).toContain("state: running")
+
+      const oldStatus = await runCli(root, ["status", "nullclaw@v2026.3.7"])
+      expect(oldStatus).toContain("state: stopped")
+    } finally {
+      await cleanupRoot(root)
     }
   })
 })
@@ -662,10 +799,16 @@ describe("tier 2 clawctl cli", () => {
       const chatOutput = await runCli(root, ["chat", "hello-tier2"])
       expect(chatOutput).toBe("reply:hello-tier2")
 
+      const statusOutput = await runCli(root, ["status"])
+      expect(statusOutput).toContain(
+        implementation === "openclaw" ? "supervision: native-daemon" : "supervision: proxy",
+      )
+      expect(statusOutput).toContain("state: running")
+
       const installedOutput = await runCli(root, ["list", "--installed"])
       expect(installedOutput).toContain(`${implementation}@${version} *`)
     } finally {
-      await rm(root, { recursive: true, force: true })
+      await cleanupRoot(root)
     }
   })
 
@@ -683,7 +826,7 @@ describe("tier 2 clawctl cli", () => {
       const installedOutput = await runCli(root, ["list", "--installed"])
       expect(installedOutput).not.toContain("openclaw@")
     } finally {
-      await rm(root, { recursive: true, force: true })
+      await cleanupRoot(root)
     }
   })
 })
@@ -694,6 +837,7 @@ describe("remote versions", () => {
     ["openclaw", ["2026.3.7", "2026.3.6"]],
     ["nanobot", ["0.1.4.post4", "0.1.4.post3"]],
     ["nanoclaw", ["main"]],
+    ["ironclaw", ["v0.9.0", "v0.8.9"]],
     ["piclaw", ["v0.3.0", "v0.2.9"]],
   ])("lists remote versions for %s", async (implementation, expectedVersions) => {
     const root = await createTempRoot()
@@ -701,7 +845,7 @@ describe("remote versions", () => {
       const output = await runCli(root, ["versions", implementation])
       expect(output.split("\n")).toEqual(expectedVersions)
     } finally {
-      await rm(root, { recursive: true, force: true })
+      await cleanupRoot(root)
     }
   })
 
@@ -711,7 +855,7 @@ describe("remote versions", () => {
       const output = await runCliExpectFailure(root, ["versions", "openclaw@2026.3.7"])
       expect(output).toContain("versions target must not include a version")
     } finally {
-      await rm(root, { recursive: true, force: true })
+      await cleanupRoot(root)
     }
   })
 })
@@ -730,13 +874,33 @@ describe("tier 3 clawctl cli", () => {
       expect(await readFile(readmePath, "utf8")).toContain(implementation)
 
       const statusOutput = await runCli(root, ["status", `${implementation}@${version}`])
-      expect(statusOutput).toContain("mode: external")
+      expect(statusOutput).toContain("supervision: unmanaged")
       expect(statusOutput).toContain("chat: no")
 
       const failureOutput = await runCliExpectFailure(root, ["use", implementation])
       expect(failureOutput).toContain(`implementation cannot be activated yet: ${implementation}`)
     } finally {
-      await rm(root, { recursive: true, force: true })
+      await cleanupRoot(root)
+    }
+  })
+
+  test("installs release-backed experimental ironclaw metadata", async () => {
+    const root = await createTempRoot()
+    try {
+      const installOutput = await runCli(root, ["install", "ironclaw"])
+      expect(installOutput).toContain("installed ironclaw@v0.9.0")
+
+      const binaryPath = join(root, "installs", "local", "ironclaw", "v0.9.0", "bin", "ironclaw")
+      expect(await Bun.file(binaryPath).exists()).toBe(true)
+
+      const statusOutput = await runCli(root, ["status", "ironclaw@v0.9.0"])
+      expect(statusOutput).toContain("supervision: unmanaged")
+      expect(statusOutput).toContain("chat: no")
+
+      const failureOutput = await runCliExpectFailure(root, ["use", "ironclaw"])
+      expect(failureOutput).toContain("implementation cannot be activated yet: ironclaw")
+    } finally {
+      await cleanupRoot(root)
     }
   })
 
@@ -747,7 +911,19 @@ describe("tier 3 clawctl cli", () => {
       expect(output).toContain("ok: piclaw:docker:tool:")
       expect(output).toContain("doctor: ok")
     } finally {
-      await rm(root, { recursive: true, force: true })
+      await cleanupRoot(root)
+    }
+  })
+
+  test("doctor validates local install metadata for ironclaw", async () => {
+    const root = await createTempRoot()
+    try {
+      const output = await runCli(root, ["doctor", "ironclaw"])
+      expect(output).toContain("ok: ironclaw:local:tool:tar")
+      expect(output).toContain("ok: ironclaw:install: not installed")
+      expect(output).toContain("doctor: ok")
+    } finally {
+      await cleanupRoot(root)
     }
   })
 })

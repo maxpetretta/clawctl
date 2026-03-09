@@ -27,7 +27,26 @@ export const CurrentSelectionSchema = Schema.Struct({
   version: Schema.String,
 })
 
+export const RuntimeRecordSchema = Schema.Struct({
+  active: Schema.Boolean,
+  backend: Schema.String,
+  implementation: Schema.String,
+  lastError: Schema.optional(Schema.String),
+  managedByClawctl: Schema.Boolean,
+  pid: Schema.optional(Schema.Number),
+  port: Schema.optional(Schema.Number),
+  proxyMode: Schema.String,
+  runtimeRoot: Schema.String,
+  startedAt: Schema.optional(Schema.String),
+  state: Schema.String,
+  stoppedAt: Schema.optional(Schema.String),
+  updatedAt: Schema.String,
+  version: Schema.String,
+})
+
 export const parseInstallRecordJson = Schema.decodeUnknownSync(Schema.parseJson(InstallRecordSchema))
 export const parseCurrentSelectionJson = Schema.decodeUnknownSync(Schema.parseJson(CurrentSelectionSchema))
+export const parseRuntimeRecordJson = Schema.decodeUnknownSync(Schema.parseJson(RuntimeRecordSchema))
 export const stringifyInstallRecordJson = Schema.encodeSync(Schema.parseJson(InstallRecordSchema))
 export const stringifyCurrentSelectionJson = Schema.encodeSync(Schema.parseJson(CurrentSelectionSchema))
+export const stringifyRuntimeRecordJson = Schema.encodeSync(Schema.parseJson(RuntimeRecordSchema))

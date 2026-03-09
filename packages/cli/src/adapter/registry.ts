@@ -14,8 +14,44 @@ import type {
 import type { RegisteredImplementation } from "./types.ts"
 
 type ImplementationHook = {
-  buildChatCommand: (input: { binaryPath: string; message: string }) => string[]
+  buildChatCommand: (input: {
+    binaryPath: string
+    homeDir: string
+    message: string
+    port?: number
+    runtimeDir: string
+    stateDir: string
+    workspaceDir: string
+  }) => string[]
+  start?: (input: {
+    binaryPath: string
+    homeDir: string
+    record: {
+      implementation: string
+      resolvedVersion: string
+    }
+    runtimeDir: string
+    stateDir: string
+    workspaceDir: string
+  }) => Promise<{
+    args: string[]
+    command: string
+    env?: NodeJS.ProcessEnv
+    port?: number
+  }>
   resolveVersions?: () => Promise<ReadonlyArray<string>>
+  status?: (input: {
+    binaryPath: string
+    homeDir: string
+    port?: number
+    record: {
+      implementation: string
+      resolvedVersion: string
+    }
+    runtimeDir: string
+    stateDir: string
+    workspaceDir: string
+  }) => Promise<boolean>
   renderConfig: (input: { config: Record<string, string>; workspaceDir: string }) => Promise<
     Array<{
       content: string
@@ -23,7 +59,13 @@ type ImplementationHook = {
     }>
   >
   normalizeChatOutput?: (input: { stdout: string; stderr: string }) => string
-  runtimeEnv: (input: { homeDir: string; runtimeDir: string; workspaceDir: string }) => NodeJS.ProcessEnv
+  runtimeEnv: (input: {
+    homeDir: string
+    port?: number
+    runtimeDir: string
+    stateDir: string
+    workspaceDir: string
+  }) => NodeJS.ProcessEnv
 }
 
 type AdapterRegistration = RegisteredImplementation & {
@@ -32,6 +74,8 @@ type AdapterRegistration = RegisteredImplementation & {
     normalizeChatOutput?: true
     resolveVersions?: true
     renderConfig: true
+    start?: true
+    status?: true
     runtimeEnv: true
   }
   implementationHooks: ImplementationHook
@@ -51,20 +95,31 @@ function makeCapabilities(overrides?: Partial<CapabilityManifest>): CapabilityMa
     telegram: false,
     local: true,
     docker: false,
-    oneshot: true,
-    daemon: false,
+    daemon: true,
     ...overrides,
   }
 }
 
-function makeLocalRuntime(entryHook: AdapterHookReference): RuntimeManifest {
+function makeSupervisedProxyRuntime(entryHook: AdapterHookReference): RuntimeManifest {
   return {
-    mode: "oneshot",
+    supervision: { kind: "proxy" },
     homeStrategy: "isolated-home",
     workspaceStrategy: "per-runtime",
     entrypoint: entryHook,
     health: { kind: "none" },
     chat: entryHook,
+    ping: { kind: "prompt", text: "Reply with exactly the single word pong." },
+  }
+}
+
+function makeNativeDaemonRuntime(): RuntimeManifest {
+  return {
+    supervision: { kind: "native-daemon" },
+    homeStrategy: "isolated-home",
+    workspaceStrategy: "per-runtime",
+    entrypoint: { kind: "adapter-hook", hook: "start" },
+    health: { kind: "adapter-hook", hook: "status" },
+    chat: { kind: "adapter-hook", hook: "chat" },
     ping: { kind: "prompt", text: "Reply with exactly the single word pong." },
   }
 }
@@ -98,9 +153,9 @@ function makeReleaseBackend(input: BackendManifest["install"][number], runtime: 
   }
 }
 
-function makeExternalRuntime(): RuntimeManifest {
+function makeUnmanagedRuntime(): RuntimeManifest {
   return {
-    mode: "external",
+    supervision: { kind: "unmanaged" },
     homeStrategy: "isolated-home",
     workspaceStrategy: "per-runtime",
     entrypoint: { kind: "exec", command: [] },
@@ -146,7 +201,7 @@ function makeBootstrapRegistration(input: {
         chat: false,
         ping: false,
         telegram: true,
-        oneshot: false,
+        daemon: false,
       }),
       config: makeConfig([], []),
       backends: [
@@ -164,10 +219,70 @@ function makeBootstrapRegistration(input: {
               supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
             },
           ],
-          runtime: makeExternalRuntime(),
+          runtime: makeUnmanagedRuntime(),
         },
       ],
     },
+    ...makeInstallOnlyHooks(),
+  } satisfies AdapterRegistration
+}
+
+function makeReleaseInstallOnlyRegistration(input: {
+  assetPattern: string
+  assetArchive: Exclude<
+    BackendManifest["install"][number],
+    { strategy: "npm-package" | "python-package" | "repo-bootstrap" | "docker-build" | "source-build" }
+  >["assetRules"][number]["archive"]
+  description: string
+  displayName: string
+  docsUrl: string
+  id: string
+  repository: string
+  versionSourceRepository?: string
+}) {
+  return {
+    manifest: {
+      id: input.id,
+      displayName: input.displayName,
+      supportTier: "tier3",
+      description: input.description,
+      repository: `https://github.com/${input.repository}`,
+      docsUrl: input.docsUrl,
+      capabilities: makeCapabilities({
+        chat: false,
+        ping: false,
+        telegram: true,
+        daemon: true,
+      }),
+      config: makeConfig([], []),
+      backends: [
+        {
+          kind: "local",
+          supported: true,
+          install: [
+            {
+              strategy: "github-release",
+              priority: 1,
+              repository: input.repository,
+              versionSource: {
+                kind: "github-releases",
+                repository: input.versionSourceRepository ?? input.repository,
+              },
+              supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
+              assetRules: [
+                {
+                  match: { os: "darwin", arch: "arm64" },
+                  pattern: input.assetPattern,
+                  archive: input.assetArchive,
+                },
+              ],
+              verification: { kind: "none" },
+            },
+          ],
+          runtime: makeUnmanagedRuntime(),
+        },
+      ],
+    } satisfies ImplementationManifest,
     ...makeInstallOnlyHooks(),
   } satisfies AdapterRegistration
 }
@@ -177,7 +292,7 @@ const nullclawRegistration = {
     id: "nullclaw",
     displayName: "NullClaw",
     supportTier: "tier1",
-    description: "Release-backed one-shot local CLI install",
+    description: "Release-backed local adapter with clawctl-managed supervision",
     repository: "https://github.com/nullclaw/nullclaw",
     docsUrl: "https://github.com/nullclaw/nullclaw",
     capabilities: makeCapabilities(),
@@ -206,7 +321,7 @@ const nullclawRegistration = {
           ],
           verification: { kind: "none" },
         },
-        makeLocalRuntime({ kind: "adapter-hook", hook: "chat" }),
+        makeSupervisedProxyRuntime({ kind: "adapter-hook", hook: "chat" }),
       ),
     ],
   } satisfies ImplementationManifest,
@@ -239,7 +354,7 @@ const picoclawRegistration = {
     id: "picoclaw",
     displayName: "PicoClaw",
     supportTier: "tier1",
-    description: "Release-backed one-shot local CLI install",
+    description: "Release-backed local adapter with clawctl-managed supervision",
     repository: "https://github.com/sipeed/picoclaw",
     docsUrl: "https://github.com/sipeed/picoclaw",
     capabilities: makeCapabilities(),
@@ -268,7 +383,7 @@ const picoclawRegistration = {
           ],
           verification: { kind: "checksum-file", assetPattern: "picoclaw_0.2.0_checksums.txt" },
         },
-        makeLocalRuntime({ kind: "adapter-hook", hook: "chat" }),
+        makeSupervisedProxyRuntime({ kind: "adapter-hook", hook: "chat" }),
       ),
     ],
   } satisfies ImplementationManifest,
@@ -309,7 +424,7 @@ const zeroclawRegistration = {
     id: "zeroclaw",
     displayName: "ZeroClaw",
     supportTier: "tier1",
-    description: "Release-backed one-shot local CLI install",
+    description: "Release-backed local adapter with clawctl-managed supervision",
     repository: "https://github.com/zeroclaw-labs/zeroclaw",
     docsUrl: "https://github.com/zeroclaw-labs/zeroclaw",
     capabilities: makeCapabilities(),
@@ -338,7 +453,7 @@ const zeroclawRegistration = {
           ],
           verification: { kind: "checksum-file", assetPattern: "SHA256SUMS" },
         },
-        makeLocalRuntime({ kind: "adapter-hook", hook: "chat" }),
+        makeSupervisedProxyRuntime({ kind: "adapter-hook", hook: "chat" }),
       ),
     ],
   } satisfies ImplementationManifest,
@@ -369,7 +484,7 @@ const openclawRegistration = {
     id: "openclaw",
     displayName: "OpenClaw",
     supportTier: "tier2",
-    description: "Package-managed one-shot local CLI install",
+    description: "Package-managed local adapter with native gateway supervision",
     repository: "https://github.com/openclaw/openclaw",
     docsUrl: "https://github.com/openclaw/openclaw",
     capabilities: makeCapabilities(),
@@ -395,7 +510,7 @@ const openclawRegistration = {
             supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
           },
         ],
-        runtime: makeLocalRuntime({ kind: "adapter-hook", hook: "chat" }),
+        runtime: makeNativeDaemonRuntime(),
       },
     ],
   } satisfies ImplementationManifest,
@@ -403,6 +518,8 @@ const openclawRegistration = {
     buildChatCommand: true,
     normalizeChatOutput: true,
     renderConfig: true,
+    start: true,
+    status: true,
     runtimeEnv: true,
   },
   implementationHooks: {
@@ -410,10 +527,11 @@ const openclawRegistration = {
       binaryPath,
       "--no-color",
       "agent",
-      "--local",
       "--json",
       "--session-id",
       "clawctl",
+      "--agent",
+      "main",
       "--message",
       message,
     ],
@@ -456,15 +574,51 @@ const openclawRegistration = {
         }),
       },
     ],
-    runtimeEnv: ({ homeDir, runtimeDir }) => ({
+    runtimeEnv: ({ homeDir, stateDir }) => ({
       HOME: homeDir,
       OPENCLAW_CONFIG_PATH: resolve(homeDir, ".openclaw", "openclaw.json"),
-      OPENCLAW_STATE_DIR: resolve(runtimeDir, "state"),
+      OPENCLAW_STATE_DIR: stateDir,
       NODE_ENV: "production",
       NO_COLOR: "1",
       CI: "1",
       TERM: "dumb",
     }),
+    start: ({ binaryPath, homeDir, stateDir }) => {
+      const port = 28789
+      return Promise.resolve({
+        command: binaryPath,
+        args: ["gateway", "run", "--port", String(port), "--allow-unconfigured", "--force"],
+        env: {
+          HOME: homeDir,
+          OPENCLAW_CONFIG_PATH: resolve(homeDir, ".openclaw", "openclaw.json"),
+          OPENCLAW_STATE_DIR: stateDir,
+          NODE_ENV: "production",
+          NO_COLOR: "1",
+          CI: "1",
+          TERM: "dumb",
+        },
+        port,
+      })
+    },
+    status: async ({ binaryPath, homeDir, port, stateDir }) => {
+      if (port === undefined) {
+        return false
+      }
+      const child = Bun.spawn(
+        [binaryPath, "gateway", "health", "--url", `ws://127.0.0.1:${port}`, "--json", "--no-color"],
+        {
+          env: {
+            ...process.env,
+            HOME: homeDir,
+            OPENCLAW_STATE_DIR: stateDir,
+          },
+          stderr: "ignore",
+          stdout: "pipe",
+        },
+      )
+      const exitCode = await child.exited
+      return exitCode === 0
+    },
   },
 } satisfies AdapterRegistration
 
@@ -473,7 +627,7 @@ const nanobotRegistration = {
     id: "nanobot",
     displayName: "Nanobot",
     supportTier: "tier2",
-    description: "Package-managed one-shot local CLI install",
+    description: "Package-managed local adapter with clawctl-managed supervision",
     repository: "https://github.com/nanobot-ai/nanobot",
     docsUrl: "https://github.com/nanobot-ai/nanobot",
     capabilities: makeCapabilities(),
@@ -500,7 +654,7 @@ const nanobotRegistration = {
             supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
           },
         ],
-        runtime: makeLocalRuntime({ kind: "adapter-hook", hook: "chat" }),
+        runtime: makeSupervisedProxyRuntime({ kind: "adapter-hook", hook: "chat" }),
       },
     ],
   } satisfies ImplementationManifest,
@@ -556,6 +710,16 @@ const bitclawRegistration = makeBootstrapRegistration({
   docsUrl: "https://github.com/NickTikhonov/bitclaw",
 })
 
+const ironclawRegistration = makeReleaseInstallOnlyRegistration({
+  id: "ironclaw",
+  displayName: "IronClaw",
+  description: "Experimental PostgreSQL-backed Rust agent platform",
+  repository: "nearai/ironclaw",
+  docsUrl: "https://github.com/nearai/ironclaw",
+  assetPattern: "ironclaw-aarch64-apple-darwin.tar.gz",
+  assetArchive: { kind: "tar.gz", binaryPath: "ironclaw" },
+})
+
 const piclawRegistration = {
   manifest: {
     id: "piclaw",
@@ -570,7 +734,6 @@ const piclawRegistration = {
       status: true,
       local: false,
       docker: true,
-      oneshot: false,
     }),
     config: makeConfig([], []),
     backends: [
@@ -578,7 +741,7 @@ const piclawRegistration = {
         kind: "local",
         supported: false,
         install: [],
-        runtime: makeExternalRuntime(),
+        runtime: makeUnmanagedRuntime(),
       },
       {
         kind: "docker",
@@ -593,7 +756,7 @@ const piclawRegistration = {
             supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
           },
         ],
-        runtime: makeExternalRuntime(),
+        runtime: makeUnmanagedRuntime(),
       },
     ],
   } satisfies ImplementationManifest,
@@ -608,6 +771,7 @@ export const adapterRegistrations = [
   nanobotRegistration,
   nanoclawRegistration,
   bitclawRegistration,
+  ironclawRegistration,
   piclawRegistration,
 ] as const
 

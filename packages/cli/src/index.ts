@@ -6,6 +6,7 @@ import { BunContext, BunRuntime } from "@effect/platform-bun"
 import { Effect, Layer } from "effect"
 
 import { resolveRuntime, runtimeBackends } from "./model.ts"
+import { maybeRunManagedDaemon } from "./runtime-service.ts"
 import { ClawctlLive, ClawctlService } from "./service.ts"
 
 const runtimeOption = Options.choice("runtime", runtimeBackends).pipe(
@@ -85,7 +86,7 @@ const pingCommand = Command.make("ping", { target: optionalTarget }, ({ target }
 
 const chatCommand = Command.make("chat", { message: requiredMessage, target: optionalTarget }, ({ message, target }) =>
   Effect.flatMap(ClawctlService, (service) => service.chat({ message, target })),
-).pipe(Command.withDescription("Send a one-shot message to a claw and print the reply."))
+).pipe(Command.withDescription("Send a message to a managed claw runtime and print the reply."))
 
 const stopCommand = Command.make("stop", { runtime: runtimeOption, target: optionalTarget }, ({ runtime, target }) =>
   Effect.flatMap(ClawctlService, (service) => service.stop({ runtime: resolveRuntime(runtime), target })),
@@ -151,4 +152,7 @@ const MainLayer = ClawctlLive.pipe(
   ),
 )
 
-cli(process.argv).pipe(Effect.provide(MainLayer), BunRuntime.runMain)
+const handledDaemon = await maybeRunManagedDaemon(process.argv)
+if (!handledDaemon) {
+  cli(process.argv).pipe(Effect.provide(MainLayer), BunRuntime.runMain)
+}

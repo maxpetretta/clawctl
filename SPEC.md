@@ -4,7 +4,7 @@
 
 `clawctl` is a local claw runtime manager.
 
-It installs supported claw implementations under a shared root, keeps one active claw selection, renders per-claw runtime config from shared credentials, and exposes a small pass-through CLI for install, selection, health checks, and one-shot chat.
+It installs supported claw implementations under a shared root, keeps one active claw selection, renders per-claw runtime config from shared credentials, and exposes a small pass-through CLI for install, selection, managed local runtime lifecycle, health checks, and chat.
 
 The product shape is closer to `nvm` or `mise` than to the original benchmark harness.
 
@@ -25,7 +25,6 @@ Implemented today:
 Modeled but not implemented yet:
 
 - Docker runtime backend
-- resident daemon lifecycle beyond one-shot local chat
 - Telegram-driven runtime ownership
 - richer help text and examples
 
@@ -35,7 +34,7 @@ Modeled but not implemented yet:
 - Keep a single active claw selection.
 - Share a small credential/config surface across supported claws.
 - Render native per-claw config into isolated runtime directories.
-- Support one-shot local `chat`, `ping`, and `status` flows where the adapter allows it.
+- Support managed local runtime `chat`, `ping`, `status`, and `stop` flows where the adapter allows it.
 - Keep the adapter model broad enough to add Docker later.
 
 ## Non-Goals
@@ -95,7 +94,10 @@ Notes on current behavior:
 - `use` auto-installs the target if it is missing locally.
 - `chat` and `ping` activate the selected record before running.
 - `cleanup` and `doctor` accept implementation targets, but `cleanup` rejects version-qualified targets.
-- `stop` is currently a no-op message for the local one-shot backend.
+- `use` auto-installs missing targets, stops the previous managed runtime, starts the new one, and then updates `current.json`.
+- `chat` and `ping` auto-activate the selected record before running.
+- `status` reports live runtime state, including managed runtime PID and port when available.
+- `stop` terminates the managed local runtime for the selected or active claw.
 - `--runtime docker` is parsed but rejected by service logic because Docker is not implemented yet.
 
 ## Shared Root Layout
@@ -140,6 +142,7 @@ Rules:
 - `config/current.json` stores the active implementation, version, and backend.
 - `config/shared.env` stores the shared config source of truth.
 - adapter-rendered native config lives under the runtime `home/` subtree.
+- managed runtime metadata lives under the runtime root and includes runtime state, PID, and port.
 
 ## Shared Configuration
 
@@ -166,19 +169,20 @@ Implementation notes:
 
 ## Runtime Model
 
-Current runtime model is local and one-shot.
+Current runtime model is local and managed by a clawctl-owned background process for activatable claws.
 
 For claws that support activation:
 
-- `use` writes the active selection
+- `use` stops the previous managed runtime, starts the selected one, and writes the active selection
 - runtime config is rendered into `runtimes/local/<impl>/<version>/home`
-- `chat` and `ping` build a one-shot command and execute it in the runtime workspace
+- a clawctl-managed background process listens on localhost and proxies `chat`, `ping`, and health requests
+- `chat` and `ping` go through that managed runtime instead of spawning directly from the foreground command
 
 Current lifecycle limitations:
 
-- there is no long-lived daemon supervisor
-- `stop` does not terminate anything because the supported runtime path is one-shot
-- `status` reports install metadata and adapter capabilities, not a real process state
+- Docker lifecycle is not implemented
+- install-only Tier 3 claws are still not activatable
+- the managed runtime is currently a clawctl proxy process, not a native daemon integration for every upstream claw
 
 ## Adapter Model
 
@@ -216,7 +220,7 @@ Not implemented on the live installer path:
 
 Each adapter currently supplies implementation hooks for:
 
-- building the one-shot chat command
+- building the proxied chat command
 - rendering config files
 - computing runtime environment variables
 - optionally normalizing chat output
@@ -231,25 +235,27 @@ Tier 1:
 - `picoclaw`
 - `zeroclaw`
 
-These are release-backed local one-shot adapters and are fully exercised by the current CLI flow.
+These are release-backed local adapters and are fully exercised by the current managed-runtime CLI flow.
 
 Tier 2:
 
 - `openclaw`
 - `nanobot`
 
-These are package-managed local one-shot adapters and are also supported by the current CLI flow.
+These are package-managed local adapters and are also supported by the current managed-runtime CLI flow.
 
 Tier 3:
 
 - `nanoclaw`
 - `bitclaw`
+- `ironclaw`
 - `piclaw`
 
 Current Tier 3 behavior:
 
 - `nanoclaw` and `bitclaw` are installable through `repo-bootstrap`
-- they are not activatable through `use` because they do not advertise supported chat/daemon capabilities
+- `ironclaw` is installable through a release-backed local adapter
+- `nanoclaw`, `bitclaw`, and `ironclaw` are not activatable through `use` because the current managed runtime only supports claws with real chat capability
 - `piclaw` is registered as Docker-first metadata only
 - `doctor piclaw` works, but Docker execution is not implemented
 

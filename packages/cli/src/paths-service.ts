@@ -26,6 +26,8 @@ type ClawctlPathsApi = {
   readonly runtimeHomeDir: (implementation: string, version: string, backend?: string) => string
   readonly runtimeWorkspaceDir: (implementation: string, version: string, backend?: string) => string
   readonly runtimeStateDir: (implementation: string, version: string, backend?: string) => string
+  readonly runtimeMetadataFile: (implementation: string, version: string, backend?: string) => string
+  readonly runtimeLogFile: (implementation: string, version: string, backend?: string) => string
 }
 
 export class ClawctlPathsService extends Context.Tag("@clawctl/cli/ClawctlPathsService")<
@@ -63,6 +65,10 @@ function makeClawctlPathsApi(path: PlatformPath.Path, rootDir: string): ClawctlP
     path.resolve(runtimeRoot(implementation, version, backend), "workspace")
   const runtimeStateDir = (implementation: string, version: string, backend = "local") =>
     path.resolve(runtimeRoot(implementation, version, backend), "state")
+  const runtimeMetadataFile = (implementation: string, version: string, backend = "local") =>
+    path.resolve(runtimeRoot(implementation, version, backend), "runtime.json")
+  const runtimeLogFile = (implementation: string, version: string, backend = "local") =>
+    path.resolve(runtimeRoot(implementation, version, backend), "service.log")
 
   return {
     paths,
@@ -76,6 +82,8 @@ function makeClawctlPathsApi(path: PlatformPath.Path, rootDir: string): ClawctlP
     runtimeHomeDir,
     runtimeWorkspaceDir,
     runtimeStateDir,
+    runtimeMetadataFile,
+    runtimeLogFile,
   }
 }
 

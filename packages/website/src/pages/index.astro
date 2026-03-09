@@ -1,29 +1,58 @@
 ---
 import "@/styles/global.css"
 
-const title = "clawctl | Runtime manager for claws"
+const title = "clawctl | Local runtime manager for claws"
 const description =
-  "Install multiple claw implementations, switch the active runtime, and share credentials across local and Docker backends."
+  "Install versioned claws under one root, switch the active claw, share credentials, and run managed local claw runtimes."
 
-const pillars = [
+const facts = [
   {
-    title: "Versioned installs",
-    copy: "Download multiple claw versions into one controlled root instead of scattering tool state across your machine.",
+    title: "What it does",
+    copy: "clawctl installs claws into a private shared root, keeps one active selection, and renders isolated runtime config from shared credentials.",
   },
   {
-    title: "One active claw",
-    copy: "Switch the active implementation like a language version manager, with a clear current runtime and shared config.",
+    title: "What works today",
+    copy: "The current implementation supports a local backend on darwin-arm64, with managed local runtimes for supported chat-capable claws plus install, use, status, doctor, cleanup, and uninstall flows.",
   },
   {
-    title: "Shared credentials",
-    copy: "Keep provider keys and Telegram bot settings in one place and render claw-native config from there.",
+    title: "What is not live yet",
+    copy: "Docker is modeled but not implemented. Telegram credentials exist in shared config, but the live adapters do not consume them yet.",
   },
 ]
 
+const supportedClaws = [
+  {
+    title: "Tier 1",
+    items: ["nullclaw", "picoclaw", "zeroclaw"],
+    copy: "Release-backed local adapters with clawctl-managed supervision.",
+  },
+  {
+    title: "Tier 2",
+    items: ["openclaw", "nanobot"],
+    copy: "Package-managed local adapters with clawctl-managed supervision.",
+  },
+  {
+    title: "Tier 3",
+    items: ["nanoclaw", "bitclaw", "ironclaw", "piclaw"],
+    copy: "Registered with limits. nanoclaw, bitclaw, and ironclaw are installable only. piclaw is Docker-first metadata only.",
+  },
+]
+
+const sharedConfig = ["CLAW_API_KEY", "CLAW_BASE_URL", "CLAW_MODEL", "TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_USERNAME"]
+
+const commands = [
+  "clawctl list",
+  "clawctl versions openclaw",
+  "clawctl config set CLAW_API_KEY sk-...",
+  "clawctl install openclaw",
+  "clawctl use openclaw",
+  'clawctl chat "Summarize the current workspace."',
+]
+
 const packages = [
-  { name: "@clawctl/cli", copy: "Effect-based command-line runtime manager." },
-  { name: "@clawctl/skill", copy: "Agent skill for using clawctl in automated workflows." },
-  { name: "@clawctl/website", copy: "Static Astro site for product docs and project framing." },
+  { name: "@clawctl/cli", copy: "Live Bun + Effect CLI implementation." },
+  { name: "@clawctl/skill", copy: "Agent skill that teaches other agents how to operate clawctl." },
+  { name: "@clawctl/website", copy: "This Astro site." },
 ]
 ---
 
@@ -39,42 +68,94 @@ const packages = [
   <body>
     <main class="shell">
       <section class="hero">
-        <p class="eyebrow">claw runtime management</p>
-        <h1>One root. Many claws. One active runtime.</h1>
+        <p class="eyebrow">local claw runtime management</p>
+        <h1>Install claws. Switch versions. Keep one active runtime.</h1>
         <p class="lede">
-          `clawctl` is a local-first runtime manager for claw implementations. Install versions, switch the active
-          claw, and keep shared credentials in one place.
+          <code>clawctl</code> is a local runtime manager for claws. It installs versioned claws under one private
+          root, keeps one active claw selection, and renders isolated runtime config from shared credentials.
         </p>
 
         <div class="terminal-card" aria-label="Example clawctl session">
-          <pre><code>$ clawctl install openclaw@2026.3.7
-$ clawctl use openclaw@2026.3.7
-$ clawctl current
-openclaw@2026.3.7 (local)</code></pre>
+          <pre><code>{commands.join("\n")}</code></pre>
         </div>
       </section>
 
       <section class="grid-section">
-        {pillars.map((pillar) => (
+        {facts.map((fact) => (
           <article class="panel">
-            <h2>{pillar.title}</h2>
-            <p>{pillar.copy}</p>
+            <h2>{fact.title}</h2>
+            <p>{fact.copy}</p>
           </article>
         ))}
       </section>
 
       <section class="split-section">
-        <div class="panel panel-heavy">
-          <p class="section-label">core workflow</p>
-          <ol>
-            <li>Install a claw version under the shared clawctl root.</li>
-            <li>Render claw-native config from shared credentials.</li>
-            <li>Mark one runtime as active and route direct commands to it.</li>
-            <li>Add Docker later without changing the top-level workflow.</li>
-          </ol>
-        </div>
+        <article class="panel panel-heavy">
+          <p class="section-label">supported claws</p>
+          <ul>
+            {supportedClaws.map((tier) => (
+              <li>
+                <strong>{tier.title}</strong>
+                <span>{tier.items.join(", ")}</span>
+                <span>{tier.copy}</span>
+              </li>
+            ))}
+          </ul>
+        </article>
 
-        <div class="panel">
+        <article class="panel">
+          <p class="section-label">current runtime model</p>
+          <ul>
+            <li>
+              <strong>Host platform</strong>
+              <span>darwin-arm64 only</span>
+            </li>
+            <li>
+              <strong>Backend</strong>
+              <span>local only</span>
+            </li>
+            <li>
+              <strong>Runtime shape</strong>
+              <span>clawctl-managed local background runtime for supported claws</span>
+            </li>
+            <li>
+              <strong>Default root</strong>
+              <span>~/.clawctl</span>
+            </li>
+          </ul>
+        </article>
+      </section>
+
+      <section class="split-section">
+        <article class="panel">
+          <p class="section-label">shared config</p>
+          <p>
+            Shared credentials live in <code>~/.clawctl/config/shared.env</code>. Current local adapters mainly use
+            the API settings, but Telegram keys are already modeled.
+          </p>
+          <ul>
+            {sharedConfig.map((key) => (
+              <li>
+                <code>{key}</code>
+              </li>
+            ))}
+          </ul>
+        </article>
+
+        <article class="panel">
+          <p class="section-label">common flow</p>
+          <ol>
+            <li>List a claw and its remote versions.</li>
+            <li>Set shared API credentials once.</li>
+            <li>Install a version into the clawctl store.</li>
+            <li>Mark one installed version as active with <code>use</code>.</li>
+            <li>Run <code>chat</code>, <code>ping</code>, <code>status</code>, or <code>doctor</code>.</li>
+          </ol>
+        </article>
+      </section>
+
+      <section class="split-section">
+        <article class="panel panel-heavy">
           <p class="section-label">workspace packages</p>
           <ul>
             {packages.map((item) => (
@@ -84,7 +165,29 @@ openclaw@2026.3.7 (local)</code></pre>
               </li>
             ))}
           </ul>
-        </div>
+        </article>
+
+        <article class="panel">
+          <p class="section-label">important caveats</p>
+          <ul>
+            <li>
+              <strong>Docker</strong>
+              <span>Parsed by the CLI, but not implemented yet.</span>
+            </li>
+            <li>
+              <strong>Telegram</strong>
+              <span>Keys are shared, but the live adapters do not use them yet.</span>
+            </li>
+            <li>
+              <strong>Tier 3</strong>
+              <span>Do not assume installable means activatable.</span>
+            </li>
+            <li>
+              <strong>Isolation</strong>
+              <span>Each runtime gets its own home, config, workspace, and state directory.</span>
+            </li>
+          </ul>
+        </article>
       </section>
     </main>
   </body>

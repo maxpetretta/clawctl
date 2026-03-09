@@ -8,7 +8,7 @@ import {
   parseSharedConfigEntries,
   sharedConfigToEntries,
   stringifySharedConfigEntries,
-} from "./shared-config.ts"
+} from "../shared-config.ts"
 
 describe("shared config", () => {
   test("loads the default shared config entries", async () => {

@@ -4,8 +4,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
 
-import { ClawctlPathsService } from "./paths-service.ts"
-import { makePathsLayer, runWithLayer } from "./test-layer.ts"
+import { ClawctlPathsService } from "../paths-service.ts"
+import { makePathsLayer, runWithLayer } from "../test-layer.ts"
 
 const tempRoots: string[] = []
 

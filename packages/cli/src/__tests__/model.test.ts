@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Option } from "effect"
 
-import { resolveRuntime } from "./model.ts"
+import { resolveRuntime } from "../model.ts"
 
 describe("resolveRuntime", () => {
   test("defaults to local", () => {

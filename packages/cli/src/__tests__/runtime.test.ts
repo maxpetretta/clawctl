@@ -1,16 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { Effect, Option, Redacted } from "effect"
 
-import type { InstallRecord } from "./adapter/types.ts"
-import { userError } from "./errors.ts"
-import { ClawctlPathsService } from "./paths-service.ts"
-import { ClawctlRuntimeService } from "./runtime-service.ts"
-import { sharedConfigToEntries } from "./shared-config.ts"
-import { ClawctlStoreService } from "./store-service.ts"
-import { makeRuntimeTestLayer, runWithLayer } from "./test-layer.ts"
+import type { InstallRecord } from "../adapter/types.ts"
+import { userError } from "../errors.ts"
+import { ClawctlPathsService } from "../paths-service.ts"
+import { ClawctlRuntimeService } from "../runtime-service.ts"
+import { sharedConfigToEntries } from "../shared-config.ts"
+import { ClawctlStoreService } from "../store-service.ts"
+import { makeRuntimeTestLayer, runWithLayer } from "../test-layer.ts"
 
 const tempRoots: string[] = []
 
@@ -24,6 +24,69 @@ async function writeExecutable(destination: string, source: string) {
   await mkdir(dirname(destination), { recursive: true })
   await writeFile(destination, source, "utf8")
   await chmod(destination, 0o755)
+}
+
+async function writeOpenclawExecutable(destination: string) {
+  await writeExecutable(
+    destination,
+    `#!/bin/sh
+if [ "$1" = "gateway" ] && [ "$2" = "run" ]; then
+  mkdir -p "\${OPENCLAW_STATE_DIR}"
+  touch "\${OPENCLAW_STATE_DIR}/ready"
+  trap 'rm -f "\${OPENCLAW_STATE_DIR}/ready"; exit 0' TERM INT
+  while true; do
+    sleep 1
+  done
+fi
+
+if [ "$1" = "gateway" ] && [ "$2" = "health" ]; then
+  if [ -f "\${OPENCLAW_STATE_DIR}/ready" ]; then
+    echo '{"state":"running"}'
+    exit 0
+  fi
+  echo '{"state":"starting"}' >&2
+  exit 1
+fi
+
+message=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--message" ]; then
+    message="$arg"
+  fi
+  prev="$arg"
+done
+printf '{"response":{"text":"reply:%s"}}\n' "$message"
+`,
+  )
+}
+
+async function stopDetachedProcesses(root: string) {
+  const runtimeDir = join(root, "runtimes", "local")
+  try {
+    const implementations = await readdir(runtimeDir)
+    for (const implementation of implementations) {
+      const implementationDir = join(runtimeDir, implementation)
+      const versions = await readdir(implementationDir)
+      for (const version of versions) {
+        const metadata = join(implementationDir, version, "runtime.json")
+        try {
+          const parsed = JSON.parse(await readFile(metadata, "utf8")) as { pid?: number }
+          if (typeof parsed.pid === "number") {
+            try {
+              process.kill(parsed.pid, "SIGTERM")
+            } catch {
+              // Ignore cleanup races with already-exited processes.
+            }
+          }
+        } catch {
+          // Ignore malformed or missing runtime metadata during cleanup.
+        }
+      }
+    }
+  } catch {
+    // Ignore missing runtime directories during cleanup.
+  }
 }
 
 function installRecord(root: string): InstallRecord {
@@ -44,13 +107,16 @@ function installRecord(root: string): InstallRecord {
 }
 
 afterEach(async () => {
-  await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+  const roots = tempRoots.splice(0)
+  await Promise.all(roots.map((root) => stopDetachedProcesses(root)))
+  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })))
 })
 
 describe("runtime service", () => {
   test("ensureActiveChatTarget uses the current selection", async () => {
     const root = await createRoot()
     const record = installRecord(root)
+    await writeOpenclawExecutable(record.entrypointCommand[0] ?? join(root, "bin", "openclaw"))
 
     const resolved = await runWithLayer(
       Effect.gen(function* () {
@@ -114,6 +180,7 @@ describe("runtime service", () => {
   test("activateSelection writes rendered config and current state", async () => {
     const root = await createRoot()
     const record = installRecord(root)
+    await writeOpenclawExecutable(record.entrypointCommand[0] ?? join(root, "bin", "openclaw"))
 
     const activated = await runWithLayer(
       Effect.gen(function* () {
@@ -126,6 +193,7 @@ describe("runtime service", () => {
           implementation: "openclaw",
           version: "2026.3.7",
         })
+        const runtimeState = yield* runtime.runtimeState(record)
         const current = yield* store.readCurrentSelection
         const configFile = join(paths.runtimeRoot("openclaw", "2026.3.7"), "home", ".openclaw", "openclaw.json")
         return {
@@ -135,6 +203,7 @@ describe("runtime service", () => {
             catch: (cause) => userError("runtime.test", String(cause)),
           }),
           current,
+          runtimeState,
         }
       }),
       makeRuntimeTestLayer(root),
@@ -147,25 +216,14 @@ describe("runtime service", () => {
       backend: "local",
     })
     expect(activated.configText).toContain("openai-completions")
+    expect(activated.runtimeState.state).toBe("running")
+    expect(activated.runtimeState.port).toBe(28789)
   })
 
-  test("runChat renders config and normalizes output", async () => {
+  test("runChatDirect renders config and normalizes output", async () => {
     const root = await createRoot()
     const record = installRecord(root)
-    await writeExecutable(
-      record.entrypointCommand[0] ?? join(root, "bin", "openclaw"),
-      `#!/bin/sh
-message=""
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "--message" ]; then
-    message="$arg"
-  fi
-  prev="$arg"
-done
-printf '{"response":{"text":"reply:%s"}}\n' "$message"
-`,
-    )
+    await writeOpenclawExecutable(record.entrypointCommand[0] ?? join(root, "bin", "openclaw"))
 
     const output = await runWithLayer(
       Effect.gen(function* () {
@@ -173,7 +231,7 @@ printf '{"response":{"text":"reply:%s"}}\n' "$message"
         const runtime = yield* ClawctlRuntimeService
         yield* store.writeInstallRecord(record)
         yield* store.setSharedConfigValue("CLAW_API_KEY", "secret")
-        return yield* runtime.runChat(record, "hello-runtime")
+        return yield* runtime.runChatDirect(record, "hello-runtime")
       }),
       makeRuntimeTestLayer(root),
     )
@@ -191,7 +249,7 @@ printf '{"response":{"text":"reply:%s"}}\n' "$message"
           const store = yield* ClawctlStoreService
           const runtime = yield* ClawctlRuntimeService
           yield* store.writeInstallRecord(record)
-          return yield* runtime.runChat(record, "hello-runtime")
+          return yield* runtime.runChatDirect(record, "hello-runtime")
         }),
         makeRuntimeTestLayer(root),
       ),
@@ -204,14 +262,38 @@ printf '{"response":{"text":"reply:%s"}}\n' "$message"
           const runtime = yield* ClawctlRuntimeService
           yield* store.writeInstallRecord(record)
           yield* store.setSharedConfigValue("CLAW_API_KEY", "secret")
-          return yield* runtime.runChat(record, "hello-runtime")
+          return yield* runtime.runChatDirect(record, "hello-runtime")
         }),
         makeRuntimeTestLayer(root),
       ),
     ).rejects.toThrow("missing binary for openclaw")
   })
 
-  test("exposes the one-shot ping prompt", async () => {
+  test("stopSelection stops a native-daemon runtime", async () => {
+    const root = await createRoot()
+    const record = installRecord(root)
+    await writeOpenclawExecutable(record.entrypointCommand[0] ?? join(root, "bin", "openclaw"))
+
+    const snapshot = await runWithLayer(
+      Effect.gen(function* () {
+        const store = yield* ClawctlStoreService
+        const runtime = yield* ClawctlRuntimeService
+        yield* store.writeInstallRecord(record)
+        yield* store.setSharedConfigValue("CLAW_API_KEY", "secret")
+        yield* runtime.activateSelection({
+          implementation: "openclaw",
+          version: "2026.3.7",
+        })
+        yield* runtime.stopSelection(Option.some("openclaw@2026.3.7"))
+        return yield* runtime.runtimeState(record)
+      }),
+      makeRuntimeTestLayer(root),
+    )
+
+    expect(snapshot.state).toBe("stopped")
+  })
+
+  test("exposes the managed ping prompt", async () => {
     const root = await createRoot()
 
     const output = await runWithLayer(

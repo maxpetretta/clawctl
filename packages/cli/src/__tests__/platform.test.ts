@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { currentHostPlatform, requireV1HostPlatform } from "./platform.ts"
+import { currentHostPlatform, requireV1HostPlatform } from "../platform.ts"
 
 function withProcessValue<Key extends "arch" | "platform", Value>(
   key: Key,
