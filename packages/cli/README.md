@@ -21,7 +21,8 @@ Supported today:
 Registered but limited:
 
 - Tier 3: `nanoclaw`, `bitclaw`, `ironclaw`, `piclaw`
-- `nanoclaw`, `bitclaw`, and `ironclaw` are installable but not activatable through the current managed runtime flow
+- `nanoclaw` and `bitclaw` support `install`, `use`, `status`, and `stop`, but not `chat` or `ping`
+- `ironclaw` is installable but not activatable through the current managed runtime flow
 - `piclaw` is Docker-first metadata only; Docker execution is not implemented yet
 
 ## Run The CLI
@@ -256,5 +257,6 @@ clawctl config set <key> <value>
 Current caveats:
 
 - `--runtime docker` is parsed but not implemented yet
-- only claws with real chat support are activatable today
+- `nanoclaw` and `bitclaw` can be activated but do not support `chat` or `ping` yet
+- `ironclaw` is still install-only
 - only `darwin-arm64` is supported right now

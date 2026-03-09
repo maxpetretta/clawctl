@@ -181,8 +181,9 @@ For claws that support activation:
 Current lifecycle limitations:
 
 - Docker lifecycle is not implemented
-- install-only Tier 3 claws are still not activatable
-- the managed runtime is currently a clawctl proxy process, not a native daemon integration for every upstream claw
+- `ironclaw` is still install-only
+- `piclaw` still requires a Docker backend
+- supported release and bootstrap claws can now run under native daemon supervision
 
 ## Adapter Model
 
@@ -254,8 +255,10 @@ Tier 3:
 Current Tier 3 behavior:
 
 - `nanoclaw` and `bitclaw` are installable through `repo-bootstrap`
+- `nanoclaw` and `bitclaw` support `use`, `status`, and `stop` through native daemon supervision
+- `nanoclaw` and `bitclaw` do not support `chat` or `ping` yet
 - `ironclaw` is installable through a release-backed local adapter
-- `nanoclaw`, `bitclaw`, and `ironclaw` are not activatable through `use` because the current managed runtime only supports claws with real chat capability
+- `ironclaw` is not activatable through `use`
 - `piclaw` is registered as Docker-first metadata only
 - `doctor piclaw` works, but Docker execution is not implemented
 

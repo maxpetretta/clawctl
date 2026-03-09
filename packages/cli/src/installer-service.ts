@@ -574,6 +574,7 @@ export const ClawctlInstallerLive = Layer.effect(
       strategy: RepoBootstrapInstallManifest,
       requestedVersion?: string,
     ) {
+      const registration = yield* resolveRegistration(implementationId)
       const resolvedVersion =
         requestedVersion ?? (yield* resolveDefaultVersion(implementationId, strategy.versionSource))
       const stageRoot = partialInstallRoot(implementationId, resolvedVersion, stageToken())
@@ -601,12 +602,27 @@ export const ClawctlInstallerLive = Layer.effect(
         )
       }
 
+      const entrypointCommand =
+        strategy.bootstrapHook === "install" && registration.implementationHooks.install
+          ? (yield* Effect.tryPromise({
+              try: () =>
+                registration.implementationHooks.install?.({
+                  installRoot: stageRoot,
+                  requestedVersion: requestedVersion ?? "latest",
+                  resolvedVersion,
+                  stageRoot,
+                }) ?? Promise.reject(new Error("missing install hook")),
+              catch: (cause) =>
+                userError("installer.installRepoBootstrap", cause instanceof Error ? cause.message : String(cause)),
+            })).entrypointCommand
+          : []
+
       const installRootPath = yield* finalizeInstall(stageRoot, implementationId, resolvedVersion)
       const hostPlatform = yield* requireHostPlatform()
 
       return createInstallRecord(implementationId, supportTier, {
         backend: "local",
-        entrypointCommand: [],
+        entrypointCommand,
         installRoot: installRootPath,
         installStrategy: strategy.strategy,
         platform: hostPlatform,

@@ -112,6 +112,7 @@ type ResolvedRuntime = {
     implementationHooks: {
       buildChatCommand: (input: {
         binaryPath: string
+        installRoot: string
         homeDir: string
         message: string
         port?: number
@@ -119,6 +120,16 @@ type ResolvedRuntime = {
         stateDir: string
         workspaceDir: string
       }) => string[]
+      chat?: (input: {
+        binaryPath: string
+        installRoot: string
+        homeDir: string
+        message: string
+        port?: number
+        runtimeDir: string
+        stateDir: string
+        workspaceDir: string
+      }) => Promise<string>
       normalizeChatOutput?: (input: { stdout: string; stderr: string }) => string
       renderConfig: (input: { config: Record<string, string>; workspaceDir: string }) => Promise<
         Array<{
@@ -128,6 +139,7 @@ type ResolvedRuntime = {
       >
       runtimeEnv: (input: {
         homeDir: string
+        installRoot: string
         port?: number
         runtimeDir: string
         stateDir: string
@@ -135,6 +147,7 @@ type ResolvedRuntime = {
       }) => NodeJS.ProcessEnv
       start?: (input: {
         binaryPath: string
+        installRoot: string
         homeDir: string
         record: {
           implementation: string
@@ -151,6 +164,7 @@ type ResolvedRuntime = {
       }>
       status?: (input: {
         binaryPath: string
+        installRoot: string
         homeDir: string
         port?: number
         record: {
@@ -300,6 +314,7 @@ export const ClawctlRuntimeLive = Layer.effect(
         try: () =>
           registration.implementationHooks.status?.({
             binaryPath: record.entrypointCommand[0] ?? "",
+            installRoot: record.installRoot,
             homeDir,
             record: {
               implementation: record.implementation,
@@ -431,10 +446,27 @@ export const ClawctlRuntimeLive = Layer.effect(
       const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion)
       const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion)
       const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion)
+      if (registration.implementationHooks.chat) {
+        return yield* Effect.tryPromise({
+          try: () =>
+            registration.implementationHooks.chat?.({
+              binaryPath: record.entrypointCommand[0] ?? "",
+              installRoot: record.installRoot,
+              homeDir,
+              message,
+              runtimeDir,
+              stateDir,
+              workspaceDir,
+              ...(runtimeRecord?.port === undefined ? {} : { port: runtimeRecord.port }),
+            }) ?? Promise.reject(new Error("missing chat hook")),
+          catch: (cause) => userError("runtime.chatHook", cause instanceof Error ? cause.message : String(cause)),
+        })
+      }
       const commandArgs = yield* Effect.try({
         try: () =>
           registration.implementationHooks.buildChatCommand({
             binaryPath: record.entrypointCommand[0] ?? "",
+            installRoot: record.installRoot,
             homeDir,
             message,
             runtimeDir,
@@ -461,6 +493,7 @@ export const ClawctlRuntimeLive = Layer.effect(
           try: () =>
             registration.implementationHooks.runtimeEnv({
               homeDir,
+              installRoot: record.installRoot,
               runtimeDir,
               stateDir,
               workspaceDir,
@@ -521,6 +554,7 @@ export const ClawctlRuntimeLive = Layer.effect(
         try: () =>
           registration.implementationHooks.start?.({
             binaryPath: record.entrypointCommand[0] ?? "",
+            installRoot: record.installRoot,
             homeDir,
             record: {
               implementation: record.implementation,

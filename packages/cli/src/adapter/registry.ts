@@ -1,8 +1,8 @@
+import { existsSync } from "node:fs"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import type {
-  AdapterHookReference,
   BackendManifest,
   CapabilityManifest,
   ConfigFileManifest,
@@ -16,6 +16,7 @@ import type { RegisteredImplementation } from "./types.ts"
 type ImplementationHook = {
   buildChatCommand: (input: {
     binaryPath: string
+    installRoot: string
     homeDir: string
     message: string
     port?: number
@@ -23,8 +24,27 @@ type ImplementationHook = {
     stateDir: string
     workspaceDir: string
   }) => string[]
+  chat?: (input: {
+    binaryPath: string
+    installRoot: string
+    homeDir: string
+    message: string
+    port?: number
+    runtimeDir: string
+    stateDir: string
+    workspaceDir: string
+  }) => Promise<string>
+  install?: (input: {
+    installRoot: string
+    requestedVersion: string
+    resolvedVersion: string
+    stageRoot: string
+  }) => Promise<{
+    entrypointCommand: string[]
+  }>
   start?: (input: {
     binaryPath: string
+    installRoot: string
     homeDir: string
     record: {
       implementation: string
@@ -42,6 +62,7 @@ type ImplementationHook = {
   resolveVersions?: () => Promise<ReadonlyArray<string>>
   status?: (input: {
     binaryPath: string
+    installRoot: string
     homeDir: string
     port?: number
     record: {
@@ -61,6 +82,7 @@ type ImplementationHook = {
   normalizeChatOutput?: (input: { stdout: string; stderr: string }) => string
   runtimeEnv: (input: {
     homeDir: string
+    installRoot: string
     port?: number
     runtimeDir: string
     stateDir: string
@@ -71,6 +93,8 @@ type ImplementationHook = {
 type AdapterRegistration = RegisteredImplementation & {
   hooks: {
     buildChatCommand: true
+    chat?: true
+    install?: true
     normalizeChatOutput?: true
     resolveVersions?: true
     renderConfig: true
@@ -97,18 +121,6 @@ function makeCapabilities(overrides?: Partial<CapabilityManifest>): CapabilityMa
     docker: false,
     daemon: true,
     ...overrides,
-  }
-}
-
-function makeSupervisedProxyRuntime(entryHook: AdapterHookReference): RuntimeManifest {
-  return {
-    supervision: { kind: "proxy" },
-    homeStrategy: "isolated-home",
-    workspaceStrategy: "per-runtime",
-    entrypoint: entryHook,
-    health: { kind: "none" },
-    chat: entryHook,
-    ping: { kind: "prompt", text: "Reply with exactly the single word pong." },
   }
 }
 
@@ -182,51 +194,6 @@ function makeInstallOnlyHooks() {
   } satisfies Pick<AdapterRegistration, "hooks" | "implementationHooks">
 }
 
-function makeBootstrapRegistration(input: {
-  description: string
-  displayName: string
-  docsUrl: string
-  id: string
-  repository: string
-}): AdapterRegistration {
-  return {
-    manifest: {
-      id: input.id,
-      displayName: input.displayName,
-      supportTier: "tier3",
-      description: input.description,
-      repository: input.repository.replace(/\.git$/u, ""),
-      docsUrl: input.docsUrl,
-      capabilities: makeCapabilities({
-        chat: false,
-        ping: false,
-        telegram: true,
-        daemon: false,
-      }),
-      config: makeConfig([], []),
-      backends: [
-        {
-          kind: "local",
-          supported: true,
-          install: [
-            {
-              strategy: "repo-bootstrap",
-              priority: 1,
-              repository: input.repository,
-              refPolicy: "branch",
-              bootstrapHook: "install",
-              versionSource: { kind: "adapter-hook", hook: "resolveVersions" },
-              supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
-            },
-          ],
-          runtime: makeUnmanagedRuntime(),
-        },
-      ],
-    },
-    ...makeInstallOnlyHooks(),
-  } satisfies AdapterRegistration
-}
-
 function makeReleaseInstallOnlyRegistration(input: {
   assetPattern: string
   assetArchive: Exclude<
@@ -292,7 +259,7 @@ const nullclawRegistration = {
     id: "nullclaw",
     displayName: "NullClaw",
     supportTier: "tier1",
-    description: "Release-backed local adapter with clawctl-managed supervision",
+    description: "Release-backed local adapter with native daemon supervision",
     repository: "https://github.com/nullclaw/nullclaw",
     docsUrl: "https://github.com/nullclaw/nullclaw",
     capabilities: makeCapabilities(),
@@ -321,13 +288,15 @@ const nullclawRegistration = {
           ],
           verification: { kind: "none" },
         },
-        makeSupervisedProxyRuntime({ kind: "adapter-hook", hook: "chat" }),
+        makeNativeDaemonRuntime(),
       ),
     ],
   } satisfies ImplementationManifest,
   hooks: {
     buildChatCommand: true,
     renderConfig: true,
+    start: true,
+    status: true,
     runtimeEnv: true,
   },
   implementationHooks: {
@@ -341,11 +310,41 @@ const nullclawRegistration = {
         }),
       },
     ],
-    runtimeEnv: ({ homeDir, workspaceDir }) => ({
+    runtimeEnv: ({ homeDir, installRoot, workspaceDir }) => ({
       HOME: homeDir,
       NULLCLAW_HOME: resolve(homeDir, ".nullclaw"),
       NULLCLAW_WORKSPACE: workspaceDir,
+      CLAWCTL_INSTALL_ROOT: installRoot,
     }),
+    start: ({ binaryPath, homeDir, installRoot, runtimeDir, stateDir, workspaceDir }) =>
+      Promise.resolve({
+        command: binaryPath,
+        args: ["gateway"],
+        env: {
+          HOME: homeDir,
+          NULLCLAW_HOME: resolve(homeDir, ".nullclaw"),
+          NULLCLAW_WORKSPACE: workspaceDir,
+          CLAWCTL_INSTALL_ROOT: installRoot,
+          CLAWCTL_RUNTIME_DIR: runtimeDir,
+          CLAWCTL_STATE_DIR: stateDir,
+        },
+      }),
+    status: async ({ binaryPath, homeDir, installRoot, runtimeDir, stateDir, workspaceDir }) => {
+      const child = Bun.spawn([binaryPath, "status"], {
+        env: {
+          ...process.env,
+          HOME: homeDir,
+          NULLCLAW_HOME: resolve(homeDir, ".nullclaw"),
+          NULLCLAW_WORKSPACE: workspaceDir,
+          CLAWCTL_INSTALL_ROOT: installRoot,
+          CLAWCTL_RUNTIME_DIR: runtimeDir,
+          CLAWCTL_STATE_DIR: stateDir,
+        },
+        stderr: "ignore",
+        stdout: "ignore",
+      })
+      return (await child.exited) === 0
+    },
   },
 } satisfies AdapterRegistration
 
@@ -354,7 +353,7 @@ const picoclawRegistration = {
     id: "picoclaw",
     displayName: "PicoClaw",
     supportTier: "tier1",
-    description: "Release-backed local adapter with clawctl-managed supervision",
+    description: "Release-backed local adapter with native daemon supervision",
     repository: "https://github.com/sipeed/picoclaw",
     docsUrl: "https://github.com/sipeed/picoclaw",
     capabilities: makeCapabilities(),
@@ -383,13 +382,15 @@ const picoclawRegistration = {
           ],
           verification: { kind: "checksum-file", assetPattern: "picoclaw_0.2.0_checksums.txt" },
         },
-        makeSupervisedProxyRuntime({ kind: "adapter-hook", hook: "chat" }),
+        makeNativeDaemonRuntime(),
       ),
     ],
   } satisfies ImplementationManifest,
   hooks: {
     buildChatCommand: true,
     renderConfig: true,
+    start: true,
+    status: true,
     runtimeEnv: true,
   },
   implementationHooks: {
@@ -412,10 +413,38 @@ const picoclawRegistration = {
         }),
       },
     ],
-    runtimeEnv: ({ homeDir }) => ({
+    runtimeEnv: ({ homeDir, installRoot }) => ({
       HOME: homeDir,
       PICOCLAW_HOME: homeDir,
+      CLAWCTL_INSTALL_ROOT: installRoot,
     }),
+    start: ({ binaryPath, homeDir, installRoot, runtimeDir, stateDir }) =>
+      Promise.resolve({
+        command: binaryPath,
+        args: ["gateway"],
+        env: {
+          HOME: homeDir,
+          PICOCLAW_HOME: homeDir,
+          CLAWCTL_INSTALL_ROOT: installRoot,
+          CLAWCTL_RUNTIME_DIR: runtimeDir,
+          CLAWCTL_STATE_DIR: stateDir,
+        },
+      }),
+    status: async ({ binaryPath, homeDir, installRoot, runtimeDir, stateDir }) => {
+      const child = Bun.spawn([binaryPath, "status"], {
+        env: {
+          ...process.env,
+          HOME: homeDir,
+          PICOCLAW_HOME: homeDir,
+          CLAWCTL_INSTALL_ROOT: installRoot,
+          CLAWCTL_RUNTIME_DIR: runtimeDir,
+          CLAWCTL_STATE_DIR: stateDir,
+        },
+        stderr: "ignore",
+        stdout: "ignore",
+      })
+      return (await child.exited) === 0
+    },
   },
 } satisfies AdapterRegistration
 
@@ -424,7 +453,7 @@ const zeroclawRegistration = {
     id: "zeroclaw",
     displayName: "ZeroClaw",
     supportTier: "tier1",
-    description: "Release-backed local adapter with clawctl-managed supervision",
+    description: "Release-backed local adapter with native daemon supervision",
     repository: "https://github.com/zeroclaw-labs/zeroclaw",
     docsUrl: "https://github.com/zeroclaw-labs/zeroclaw",
     capabilities: makeCapabilities(),
@@ -453,13 +482,15 @@ const zeroclawRegistration = {
           ],
           verification: { kind: "checksum-file", assetPattern: "SHA256SUMS" },
         },
-        makeSupervisedProxyRuntime({ kind: "adapter-hook", hook: "chat" }),
+        makeNativeDaemonRuntime(),
       ),
     ],
   } satisfies ImplementationManifest,
   hooks: {
     buildChatCommand: true,
     renderConfig: true,
+    start: true,
+    status: true,
     runtimeEnv: true,
   },
   implementationHooks: {
@@ -473,9 +504,35 @@ const zeroclawRegistration = {
         }),
       },
     ],
-    runtimeEnv: ({ homeDir }) => ({
+    runtimeEnv: ({ homeDir, installRoot }) => ({
       HOME: homeDir,
+      CLAWCTL_INSTALL_ROOT: installRoot,
     }),
+    start: ({ binaryPath, homeDir, installRoot, runtimeDir, stateDir }) =>
+      Promise.resolve({
+        command: binaryPath,
+        args: ["daemon"],
+        env: {
+          HOME: homeDir,
+          CLAWCTL_INSTALL_ROOT: installRoot,
+          CLAWCTL_RUNTIME_DIR: runtimeDir,
+          CLAWCTL_STATE_DIR: stateDir,
+        },
+      }),
+    status: async ({ binaryPath, homeDir, installRoot, runtimeDir, stateDir }) => {
+      const child = Bun.spawn([binaryPath, "status"], {
+        env: {
+          ...process.env,
+          HOME: homeDir,
+          CLAWCTL_INSTALL_ROOT: installRoot,
+          CLAWCTL_RUNTIME_DIR: runtimeDir,
+          CLAWCTL_STATE_DIR: stateDir,
+        },
+        stderr: "ignore",
+        stdout: "ignore",
+      })
+      return (await child.exited) === 0
+    },
   },
 } satisfies AdapterRegistration
 
@@ -627,7 +684,7 @@ const nanobotRegistration = {
     id: "nanobot",
     displayName: "Nanobot",
     supportTier: "tier2",
-    description: "Package-managed local adapter with clawctl-managed supervision",
+    description: "Package-managed local adapter with native daemon supervision",
     repository: "https://github.com/nanobot-ai/nanobot",
     docsUrl: "https://github.com/nanobot-ai/nanobot",
     capabilities: makeCapabilities(),
@@ -654,29 +711,25 @@ const nanobotRegistration = {
             supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
           },
         ],
-        runtime: makeSupervisedProxyRuntime({ kind: "adapter-hook", hook: "chat" }),
+        runtime: makeNativeDaemonRuntime(),
       },
     ],
   } satisfies ImplementationManifest,
   hooks: {
     buildChatCommand: true,
     renderConfig: true,
+    start: true,
+    status: true,
     runtimeEnv: true,
   },
   implementationHooks: {
-    buildChatCommand: ({ binaryPath, message }) => [
+    buildChatCommand: ({ binaryPath, homeDir, message }) => [
       binaryPath,
-      "agent",
       "--config",
-      ".nanobot/config.json",
-      "--workspace",
-      ".",
-      "--session",
-      "clawctl",
-      "--message",
+      resolve(homeDir, ".nanobot", "config.json"),
+      "call",
+      "defaults",
       message,
-      "--no-markdown",
-      "--no-logs",
     ],
     renderConfig: async ({ config, workspaceDir }) => [
       {
@@ -687,28 +740,236 @@ const nanobotRegistration = {
         }),
       },
     ],
-    runtimeEnv: ({ homeDir }) => ({
+    runtimeEnv: ({ homeDir, installRoot }) => ({
       HOME: homeDir,
-      PYTHONUNBUFFERED: "1",
+      CLAWCTL_INSTALL_ROOT: installRoot,
+      NO_COLOR: "1",
     }),
+    start: ({ binaryPath, homeDir, installRoot }) => {
+      const port = 28080
+      return Promise.resolve({
+        command: binaryPath,
+        args: [
+          "--config",
+          resolve(homeDir, ".nanobot", "config.json"),
+          "run",
+          "--listen-address",
+          `127.0.0.1:${port}`,
+          "--disable-ui",
+          "--healthz-path",
+          "/healthz",
+          "--agent",
+          "defaults",
+        ],
+        env: {
+          HOME: homeDir,
+          CLAWCTL_INSTALL_ROOT: installRoot,
+          NO_COLOR: "1",
+        },
+        port,
+      })
+    },
+    status: async ({ port }) => {
+      if (port === undefined) {
+        return false
+      }
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/healthz`)
+        return response.ok
+      } catch {
+        return false
+      }
+    },
   },
 } satisfies AdapterRegistration
 
-const nanoclawRegistration = makeBootstrapRegistration({
-  id: "nanoclaw",
-  displayName: "NanoClaw",
-  description: "Experimental bootstrap-heavy local install",
-  repository: "https://github.com/qwibitai/nanoclaw.git",
-  docsUrl: "https://github.com/qwibitai/nanoclaw",
-})
+const nanoclawRegistration = {
+  manifest: {
+    id: "nanoclaw",
+    displayName: "NanoClaw",
+    supportTier: "tier3",
+    description: "Bootstrap-heavy local install with native daemon supervision",
+    repository: "https://github.com/qwibitai/nanoclaw",
+    docsUrl: "https://github.com/qwibitai/nanoclaw",
+    capabilities: makeCapabilities({
+      chat: false,
+      ping: false,
+      telegram: true,
+    }),
+    config: makeConfig([], []),
+    backends: [
+      {
+        kind: "local",
+        supported: true,
+        install: [
+          {
+            strategy: "repo-bootstrap",
+            priority: 1,
+            repository: "https://github.com/qwibitai/nanoclaw.git",
+            refPolicy: "branch",
+            bootstrapHook: "install",
+            versionSource: { kind: "adapter-hook", hook: "resolveVersions" },
+            supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
+          },
+        ],
+        runtime: makeNativeDaemonRuntime(),
+      },
+    ],
+  } satisfies ImplementationManifest,
+  hooks: {
+    buildChatCommand: true,
+    install: true,
+    resolveVersions: true,
+    renderConfig: true,
+    start: true,
+    status: true,
+    runtimeEnv: true,
+  },
+  implementationHooks: {
+    buildChatCommand: () => [],
+    install: async ({ installRoot }) => {
+      const repoDir = resolve(installRoot, "repo")
+      const install = Bun.spawn([process.env.CLAWCTL_NPM_BIN ?? "npm", "ci"], {
+        cwd: repoDir,
+        env: process.env,
+        stderr: "inherit",
+        stdout: "inherit",
+      })
+      if ((await install.exited) !== 0) {
+        throw new Error("nanoclaw bootstrap failed during npm ci")
+      }
+      const build = Bun.spawn([process.env.CLAWCTL_NPM_BIN ?? "npm", "run", "build"], {
+        cwd: repoDir,
+        env: process.env,
+        stderr: "inherit",
+        stdout: "inherit",
+      })
+      if ((await build.exited) !== 0) {
+        throw new Error("nanoclaw bootstrap failed during npm run build")
+      }
+      return {
+        entrypointCommand: ["node", resolve(repoDir, "dist", "index.js")],
+      }
+    },
+    resolveVersions: async () => ["main"],
+    renderConfig: async () => [],
+    runtimeEnv: ({ homeDir, installRoot }) => ({
+      HOME: homeDir,
+      CLAWCTL_INSTALL_ROOT: installRoot,
+      NO_COLOR: "1",
+      CI: "1",
+    }),
+    start: ({ installRoot, homeDir, runtimeDir, stateDir, workspaceDir }) =>
+      Promise.resolve({
+        command: "node",
+        args: [resolve(installRoot, "repo", "dist", "index.js")],
+        env: {
+          HOME: homeDir,
+          CLAWCTL_INSTALL_ROOT: installRoot,
+          CLAWCTL_RUNTIME_DIR: runtimeDir,
+          CLAWCTL_STATE_DIR: stateDir,
+          CLAWCTL_WORKSPACE_DIR: workspaceDir,
+          NO_COLOR: "1",
+          CI: "1",
+        },
+      }),
+    status: ({ installRoot }) => {
+      return Promise.resolve(existsSync(resolve(installRoot, "repo", "data", "ipc")))
+    },
+  },
+} satisfies AdapterRegistration
 
-const bitclawRegistration = makeBootstrapRegistration({
-  id: "bitclaw",
-  displayName: "BitClaw",
-  description: "Experimental bootstrap-heavy local install",
-  repository: "https://github.com/NickTikhonov/bitclaw.git",
-  docsUrl: "https://github.com/NickTikhonov/bitclaw",
-})
+const bitclawRegistration = {
+  manifest: {
+    id: "bitclaw",
+    displayName: "BitClaw",
+    supportTier: "tier3",
+    description: "Bootstrap-heavy local install with native daemon supervision",
+    repository: "https://github.com/NickTikhonov/bitclaw",
+    docsUrl: "https://github.com/NickTikhonov/bitclaw",
+    capabilities: makeCapabilities({
+      chat: false,
+      ping: false,
+      telegram: true,
+    }),
+    config: makeConfig([], []),
+    backends: [
+      {
+        kind: "local",
+        supported: true,
+        install: [
+          {
+            strategy: "repo-bootstrap",
+            priority: 1,
+            repository: "https://github.com/NickTikhonov/bitclaw.git",
+            refPolicy: "branch",
+            bootstrapHook: "install",
+            versionSource: { kind: "adapter-hook", hook: "resolveVersions" },
+            supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
+          },
+        ],
+        runtime: makeNativeDaemonRuntime(),
+      },
+    ],
+  } satisfies ImplementationManifest,
+  hooks: {
+    buildChatCommand: true,
+    install: true,
+    resolveVersions: true,
+    renderConfig: true,
+    start: true,
+    status: true,
+    runtimeEnv: true,
+  },
+  implementationHooks: {
+    buildChatCommand: () => [],
+    install: async ({ installRoot }) => {
+      const repoDir = resolve(installRoot, "repo")
+      const install = Bun.spawn([process.env.CLAWCTL_NPM_BIN ?? "npm", "ci"], {
+        cwd: repoDir,
+        env: process.env,
+        stderr: "inherit",
+        stdout: "inherit",
+      })
+      if ((await install.exited) !== 0) {
+        throw new Error("bitclaw bootstrap failed during npm ci")
+      }
+      return {
+        entrypointCommand: ["node", resolve(repoDir, "node_modules", "tsx", "dist", "cli.mjs")],
+      }
+    },
+    resolveVersions: async () => ["main"],
+    renderConfig: async () => [],
+    runtimeEnv: ({ homeDir, installRoot }) => ({
+      HOME: homeDir,
+      BITCLAW_HOME: homeDir,
+      CLAWCTL_INSTALL_ROOT: installRoot,
+      NO_COLOR: "1",
+      CI: "1",
+    }),
+    start: ({ installRoot, homeDir, runtimeDir, stateDir, workspaceDir }) =>
+      Promise.resolve({
+        command: "node",
+        args: [resolve(installRoot, "repo", "node_modules", "tsx", "dist", "cli.mjs"), "src/main.ts"],
+        env: {
+          HOME: homeDir,
+          BITCLAW_HOME: homeDir,
+          CLAWCTL_INSTALL_ROOT: installRoot,
+          CLAWCTL_RUNTIME_DIR: runtimeDir,
+          CLAWCTL_STATE_DIR: stateDir,
+          CLAWCTL_WORKSPACE_DIR: workspaceDir,
+          NO_COLOR: "1",
+          CI: "1",
+        },
+      }),
+    status: ({ homeDir }) => {
+      const ipcDir = resolve(homeDir, "ipc")
+      const inboundDir = resolve(ipcDir, "inbound")
+      const outboundDir = resolve(ipcDir, "outbound")
+      return Promise.resolve(existsSync(inboundDir) && existsSync(outboundDir))
+    },
+  },
+} satisfies AdapterRegistration
 
 const ironclawRegistration = makeReleaseInstallOnlyRegistration({
   id: "ironclaw",

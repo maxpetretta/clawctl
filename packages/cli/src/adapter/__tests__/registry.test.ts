@@ -13,6 +13,7 @@ const config = {
 describe("adapter registry", () => {
   const runtimeInput = {
     homeDir: "/tmp/home",
+    installRoot: "/tmp/install",
     runtimeDir: "/tmp/runtime",
     stateDir: "/tmp/runtime/state",
     workspaceDir: "/tmp/workspace",
@@ -39,7 +40,7 @@ describe("adapter registry", () => {
     expect(() => getRegisteredImplementation("ghostclaw")).toThrow("unsupported implementation: ghostclaw")
   })
 
-  test("renders config and runtime env for local one-shot claws", async () => {
+  test("renders config and runtime env for local adapters", async () => {
     const nullclaw = getRegisteredImplementation("nullclaw")
     const picoclaw = getRegisteredImplementation("picoclaw")
     const zeroclaw = getRegisteredImplementation("zeroclaw")
@@ -60,7 +61,7 @@ describe("adapter registry", () => {
     ).toContain("--json")
     expect(
       nanobot.implementationHooks.buildChatCommand({ binaryPath: "/bin/nanobot", message: "hi", ...runtimeInput }),
-    ).toContain("--no-logs")
+    ).toEqual(["/bin/nanobot", "--config", "/tmp/home/.nanobot/config.json", "call", "defaults", "hi"])
 
     const nullFiles = await nullclaw.implementationHooks.renderConfig({ config, workspaceDir: "/tmp/workspace" })
     const picoFiles = await picoclaw.implementationHooks.renderConfig({ config, workspaceDir: "/tmp/workspace" })
@@ -82,6 +83,7 @@ describe("adapter registry", () => {
       HOME: "/tmp/home",
       NULLCLAW_HOME: "/tmp/home/.nullclaw",
       NULLCLAW_WORKSPACE: "/tmp/workspace",
+      CLAWCTL_INSTALL_ROOT: "/tmp/install",
     })
     expect(
       picoclaw.implementationHooks.runtimeEnv({
@@ -90,6 +92,7 @@ describe("adapter registry", () => {
     ).toEqual({
       HOME: "/tmp/home",
       PICOCLAW_HOME: "/tmp/home",
+      CLAWCTL_INSTALL_ROOT: "/tmp/install",
     })
     expect(
       zeroclaw.implementationHooks.runtimeEnv({
@@ -97,6 +100,7 @@ describe("adapter registry", () => {
       }),
     ).toEqual({
       HOME: "/tmp/home",
+      CLAWCTL_INSTALL_ROOT: "/tmp/install",
     })
     expect(
       openclaw.implementationHooks.runtimeEnv({
@@ -117,11 +121,12 @@ describe("adapter registry", () => {
       }),
     ).toEqual({
       HOME: "/tmp/home",
-      PYTHONUNBUFFERED: "1",
+      CLAWCTL_INSTALL_ROOT: "/tmp/install",
+      NO_COLOR: "1",
     })
   })
 
-  test("supports openclaw output normalization and install-only adapters", () => {
+  test("supports openclaw output normalization and experimental adapters", () => {
     const openclaw = getRegisteredImplementation("openclaw")
     const nanoclaw = getRegisteredImplementation("nanoclaw")
     const bitclaw = getRegisteredImplementation("bitclaw")
@@ -165,6 +170,12 @@ describe("adapter registry", () => {
       repository: "https://github.com/rcarmo/piclaw.git",
     })
     expect(nanoclaw.implementationHooks.resolveVersions).toBeDefined()
+    expect(nanoclaw.implementationHooks.install).toBeDefined()
+    expect(nanoclaw.implementationHooks.start).toBeDefined()
+    expect(nanoclaw.implementationHooks.status).toBeDefined()
+    expect(bitclaw.implementationHooks.install).toBeDefined()
+    expect(bitclaw.implementationHooks.start).toBeDefined()
+    expect(bitclaw.implementationHooks.status).toBeDefined()
     expect(ironclaw.manifest.backends[0]?.install[0]).toMatchObject({
       strategy: "github-release",
       repository: "nearai/ironclaw",
@@ -174,12 +185,12 @@ describe("adapter registry", () => {
 
   test("validates invalid adapter registrations", () => {
     const localRuntime: RuntimeManifest = {
-      supervision: { kind: "proxy" },
+      supervision: { kind: "native-daemon" },
       homeStrategy: "isolated-home",
       workspaceStrategy: "per-runtime",
-      entrypoint: { kind: "exec", command: ["tool"] },
-      health: { kind: "none" },
-      chat: { kind: "argv", command: ["tool"] },
+      entrypoint: { kind: "adapter-hook", hook: "start" },
+      health: { kind: "adapter-hook", hook: "status" },
+      chat: { kind: "adapter-hook", hook: "chat" },
       ping: { kind: "prompt", text: "pong" },
     }
     const install: InstallManifest[] = [

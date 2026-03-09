@@ -33,7 +33,7 @@ Current implementation limits:
 - backend: `local` only
 - `docker` is parsed in the CLI but not implemented
 - Telegram keys exist in shared config but are not wired into live adapters yet
-- only claws with real chat support are activatable today
+- `ironclaw` is still install-only
 
 ## Claws Available
 
@@ -45,11 +45,11 @@ Fully supported today:
 Registered with limits:
 
 - `nanoclaw`
-  - installable through bootstrap
-  - not activatable through the current managed runtime flow
+  - bootstrap-backed native daemon supervision works for `install`, `use`, `status`, and `stop`
+  - `chat` and `ping` are not implemented
 - `bitclaw`
-  - installable through bootstrap
-  - not activatable through the current managed runtime flow
+  - bootstrap-backed native daemon supervision works for `install`, `use`, `status`, and `stop`
+  - `chat` and `ping` are not implemented
 - `ironclaw`
   - release-backed install metadata works
   - not activatable through the current managed runtime flow
@@ -196,7 +196,8 @@ When helping with `clawctl`:
 - Use `clawctl versions <implementation>` before assuming a version exists upstream.
 - Use `clawctl doctor` before guessing why an install or runtime path is broken.
 - Treat `docker` as not implemented today.
-- Treat Tier 3 adapters as limited unless the task is explicitly about install metadata or bootstrap flows.
+- Treat `ironclaw` and `piclaw` as limited.
+- Treat `nanoclaw` and `bitclaw` as startable but not messageable through `clawctl`.
 - Do not claim Telegram transport is working through `clawctl` yet.
 - `stop` is real for the current managed local backend.
 

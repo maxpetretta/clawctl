@@ -21,7 +21,7 @@ Current limits:
 - supported host platform: `darwin-arm64`
 - `docker` is modeled but not implemented yet
 - Telegram keys exist in shared config but are not wired into live adapters yet
-- only claws with real chat support are activatable today
+- `piclaw` and `ironclaw` are not fully activatable yet
 
 ## Supported Claws
 
@@ -33,11 +33,11 @@ Fully supported:
 Registered with limits:
 
 - `nanoclaw`
-  - installable through bootstrap
-  - not activatable through the current managed runtime flow
+  - bootstrap-backed native daemon supervision works for `install`, `use`, `status`, and `stop`
+  - `chat` and `ping` are still not implemented
 - `bitclaw`
-  - installable through bootstrap
-  - not activatable through the current managed runtime flow
+  - bootstrap-backed native daemon supervision works for `install`, `use`, `status`, and `stop`
+  - `chat` and `ping` are still not implemented
 - `ironclaw`
   - release-backed install metadata works
   - not activatable through the current managed runtime flow

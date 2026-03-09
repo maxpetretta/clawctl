@@ -58,6 +58,7 @@ function printStatus(
 ): Effect.Effect<void, ClawctlError> {
   const runtime = registration.manifest.backends.find((backend) => backend.kind === record.backend)?.runtime
   return EffectRuntime.gen(function* () {
+    const runtimeStateLabel = runtime?.supervision.kind === "unmanaged" ? "install-only" : runtimeState.state
     yield* writeLine(`${record.implementation}@${record.resolvedVersion}`)
     yield* writeLine(`  backend: ${record.backend}`)
     yield* writeLine("  installed: yes")
@@ -65,7 +66,7 @@ function printStatus(
     yield* writeLine(`  supervision: ${runtime?.supervision.kind ?? "unknown"}`)
     yield* writeLine(`  chat: ${registration.manifest.capabilities.chat ? "yes" : "no"}`)
     yield* writeLine(`  ping: ${registration.manifest.capabilities.ping ? "yes" : "no"}`)
-    yield* writeLine(`  state: ${registration.manifest.capabilities.chat ? runtimeState.state : "install-only"}`)
+    yield* writeLine(`  state: ${runtimeStateLabel}`)
     if (runtimeState.pid !== undefined) {
       yield* writeLine(`  pid: ${runtimeState.pid}`)
     }
@@ -125,7 +126,10 @@ const clawctlServiceLayer = Layer.effect(
       implementation: string,
     ) {
       const registration = yield* resolveRegistration(implementation)
-      return registration.manifest.capabilities.chat
+      const localBackend = registration.manifest.backends.find(
+        (backend) => backend.kind === "local" && backend.supported,
+      )
+      return localBackend?.runtime.supervision.kind !== "unmanaged"
     })
     const requireLocalRuntime = (runtime: string) =>
       runtime === "local"

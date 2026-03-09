@@ -27,11 +27,65 @@ const tempRoots = new Set<string>()
 async function createResponseScript(
   destination: string,
   outputMode: "plain" | "openclaw-json",
-  _binaryName: string,
+  binaryName: string,
 ): Promise<void> {
+  const daemonCases =
+    binaryName === "nullclaw"
+      ? `if [ "$1" = "gateway" ]; then
+  mkdir -p "\${CLAWCTL_STATE_DIR}"
+  touch "\${CLAWCTL_STATE_DIR}/ready"
+  trap 'rm -f "\${CLAWCTL_STATE_DIR}/ready"; exit 0' TERM INT
+  while true; do
+    sleep 1
+  done
+fi
+
+if [ "$1" = "status" ]; then
+  if [ -f "\${CLAWCTL_STATE_DIR}/ready" ]; then
+    exit 0
+  fi
+  exit 1
+fi
+`
+      : binaryName === "picoclaw"
+        ? `if [ "$1" = "gateway" ]; then
+  mkdir -p "\${CLAWCTL_STATE_DIR}"
+  touch "\${CLAWCTL_STATE_DIR}/ready"
+  trap 'rm -f "\${CLAWCTL_STATE_DIR}/ready"; exit 0' TERM INT
+  while true; do
+    sleep 1
+  done
+fi
+
+if [ "$1" = "status" ]; then
+  if [ -f "\${CLAWCTL_STATE_DIR}/ready" ]; then
+    exit 0
+  fi
+  exit 1
+fi
+`
+        : binaryName === "zeroclaw"
+          ? `if [ "$1" = "daemon" ]; then
+  mkdir -p "\${CLAWCTL_STATE_DIR}"
+  touch "\${CLAWCTL_STATE_DIR}/ready"
+  trap 'rm -f "\${CLAWCTL_STATE_DIR}/ready"; exit 0' TERM INT
+  while true; do
+    sleep 1
+  done
+fi
+
+if [ "$1" = "status" ]; then
+  if [ -f "\${CLAWCTL_STATE_DIR}/ready" ]; then
+    exit 0
+  fi
+  exit 1
+fi
+`
+          : ""
   const source =
     outputMode === "openclaw-json"
       ? `#!/bin/sh
+${daemonCases}
 message=""
 last=""
 prev=""
@@ -53,6 +107,7 @@ fi
 printf '{"response":{"text":"%s"}}\n' "$value"
 `
       : `#!/bin/sh
+${daemonCases}
 if [ "$1" = "agent" ]; then
   shift
 fi
@@ -156,6 +211,21 @@ async function createFakeInstallers(root: string): Promise<void> {
   await writeFile(
     fakeNpmPath,
     `#!/bin/sh
+repo_name=""
+if [ -n "$PWD" ]; then
+  repo_name=$(basename "$PWD")
+fi
+if [ "$repo_name" = "repo" ] && [ -f "$PWD/README.md" ]; then
+  case "$(cat "$PWD/README.md")" in
+    *nanoclaw*)
+      repo_name="nanoclaw"
+      ;;
+    *bitclaw*)
+      repo_name="bitclaw"
+      ;;
+  esac
+fi
+
 if [ "$1" = "view" ] && [ "$2" = "openclaw" ] && [ "$3" = "version" ] && [ "$4" = "--json" ]; then
   echo '"2026.3.7"'
   exit 0
@@ -243,6 +313,63 @@ EOF
   esac
 fi
 
+if [ "$1" = "ci" ]; then
+  case "$repo_name" in
+    nanoclaw)
+      mkdir -p "$PWD/node_modules"
+      exit 0
+      ;;
+    bitclaw)
+      mkdir -p "$PWD/node_modules/tsx/dist"
+      cat > "$PWD/node_modules/tsx/dist/cli.mjs" <<'EOF'
+#!/usr/bin/env node
+import fs from "node:fs"
+import path from "node:path"
+const homeDir = process.env.BITCLAW_HOME || process.env.HOME || process.cwd()
+const inboundDir = path.join(homeDir, "ipc", "inbound")
+const outboundDir = path.join(homeDir, "ipc", "outbound")
+fs.mkdirSync(inboundDir, { recursive: true })
+fs.mkdirSync(outboundDir, { recursive: true })
+const cleanup = () => {
+  try {
+    fs.rmSync(path.join(homeDir, "ipc"), { recursive: true, force: true })
+  } catch {}
+  process.exit(0)
+}
+process.on("SIGTERM", cleanup)
+process.on("SIGINT", cleanup)
+setInterval(() => {}, 1000)
+EOF
+      chmod 755 "$PWD/node_modules/tsx/dist/cli.mjs"
+      exit 0
+      ;;
+  esac
+fi
+
+if [ "$1" = "run" ] && [ "$2" = "build" ]; then
+  case "$repo_name" in
+    nanoclaw)
+      mkdir -p "$PWD/dist"
+      cat > "$PWD/dist/index.js" <<'EOF'
+const fs = require("fs")
+const path = require("path")
+const ipcDir = path.join(__dirname, "..", "data", "ipc")
+fs.mkdirSync(ipcDir, { recursive: true })
+const cleanup = () => {
+  try {
+    fs.rmSync(ipcDir, { recursive: true, force: true })
+  } catch {}
+  process.exit(0)
+}
+process.on("SIGTERM", cleanup)
+process.on("SIGINT", cleanup)
+setInterval(() => {}, 1000)
+EOF
+      exit 0
+      ;;
+  esac
+fi
+
 echo "unsupported npm invocation: $*" >&2
 exit 1
 `,
@@ -280,6 +407,24 @@ if [ "$1" = "tool" ] && [ "$2" = "install" ]; then
     nanobot-ai==*)
       cat > "$tool_dir/bin/nanobot" <<'EOF'
 #!/bin/sh
+if [ "$3" = "run" ] || [ "$1" = "run" ]; then
+  listen="127.0.0.1:28080"
+  healthz="/healthz"
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--listen-address" ]; then
+      listen="$arg"
+    fi
+    if [ "$prev" = "--healthz-path" ]; then
+      healthz="$arg"
+    fi
+    prev="$arg"
+  done
+  host=$(printf "%s" "$listen" | cut -d: -f1)
+  port=$(printf "%s" "$listen" | cut -d: -f2)
+  exec node -e 'const http=require("http"); const host=process.argv[1]; const port=Number(process.argv[2]); const healthz=process.argv[3]; const server=http.createServer((req,res)=>{ if(req.url===healthz){ res.statusCode=200; res.end("ok"); return; } res.statusCode=404; res.end("not found");}); server.listen(port, host); const shutdown=()=>server.close(()=>process.exit(0)); process.on("SIGTERM", shutdown); process.on("SIGINT", shutdown);' "$host" "$port" "$healthz"
+fi
+
 message=""
 last=""
 prev=""
@@ -690,7 +835,8 @@ describe("tier 1 clawctl cli", () => {
       expect(chatOutput).toBe("reply:hello-world")
 
       const statusOutput = await runCli(root, ["status"])
-      expect(statusOutput).toContain("supervision: proxy")
+      expect(statusOutput).toContain("supervision: native-daemon")
+      expect(statusOutput).toContain("state: running")
     } finally {
       await cleanupRoot(root)
     }
@@ -800,9 +946,7 @@ describe("tier 2 clawctl cli", () => {
       expect(chatOutput).toBe("reply:hello-tier2")
 
       const statusOutput = await runCli(root, ["status"])
-      expect(statusOutput).toContain(
-        implementation === "openclaw" ? "supervision: native-daemon" : "supervision: proxy",
-      )
+      expect(statusOutput).toContain("supervision: native-daemon")
       expect(statusOutput).toContain("state: running")
 
       const installedOutput = await runCli(root, ["list", "--installed"])
@@ -864,7 +1008,7 @@ describe("tier 3 clawctl cli", () => {
   test.each([
     ["nanoclaw", "main"],
     ["bitclaw", "main"],
-  ])("installs experimental bootstrap target %s", async (implementation, version) => {
+  ])("installs and activates experimental bootstrap target %s", async (implementation, version) => {
     const root = await createTempRoot()
     try {
       const installOutput = await runCli(root, ["install", implementation])
@@ -873,12 +1017,22 @@ describe("tier 3 clawctl cli", () => {
       const readmePath = join(root, "installs", "local", implementation, version, "repo", "README.md")
       expect(await readFile(readmePath, "utf8")).toContain(implementation)
 
+      const useOutput = await runCli(root, ["use", implementation])
+      expect(useOutput).toContain(`using ${implementation}@${version}`)
+
+      const currentOutput = await runCli(root, ["current"])
+      expect(currentOutput).toContain(`${implementation}@${version}`)
+
       const statusOutput = await runCli(root, ["status", `${implementation}@${version}`])
-      expect(statusOutput).toContain("supervision: unmanaged")
+      expect(statusOutput).toContain("supervision: native-daemon")
+      expect(statusOutput).toContain("state: running")
       expect(statusOutput).toContain("chat: no")
 
-      const failureOutput = await runCliExpectFailure(root, ["use", implementation])
-      expect(failureOutput).toContain(`implementation cannot be activated yet: ${implementation}`)
+      const stopOutput = await runCli(root, ["stop", implementation])
+      expect(stopOutput).toBe(`stopped ${implementation}@${version}`)
+
+      const stoppedOutput = await runCli(root, ["status", `${implementation}@${version}`])
+      expect(stoppedOutput).toContain("state: stopped")
     } finally {
       await cleanupRoot(root)
     }
