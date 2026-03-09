@@ -154,6 +154,11 @@ if [ "$1" = "view" ] && [ "$2" = "openclaw" ] && [ "$3" = "version" ] && [ "$4" 
   exit 0
 fi
 
+if [ "$1" = "view" ] && [ "$2" = "openclaw" ] && [ "$3" = "versions" ] && [ "$4" = "--json" ]; then
+  echo '["2026.3.7","2026.3.6"]'
+  exit 0
+fi
+
 if [ "$1" = "install" ]; then
   prefix=""
   spec=""
@@ -321,6 +326,16 @@ if [ "$1" = "clone" ]; then
   exit 0
 fi
 
+if [ "$1" = "ls-remote" ] && [ "$2" = "--tags" ] && [ "$3" = "--refs" ]; then
+  case "$4" in
+    https://github.com/rcarmo/piclaw.git)
+      printf '1111111111111111111111111111111111111111\trefs/tags/v0.3.0\n'
+      printf '2222222222222222222222222222222222222222\trefs/tags/v0.2.9\n'
+      exit 0
+      ;;
+  esac
+fi
+
 if [ "$1" = "-C" ] && [ "$3" = "checkout" ]; then
   exit 0
 fi
@@ -418,6 +433,12 @@ beforeAll(async () => {
       return
     }
 
+    if (path === "/repos/nullclaw/nullclaw/releases") {
+      response.setHeader("content-type", "application/json")
+      response.end(JSON.stringify([{ tag_name: "v2026.3.7" }, { tag_name: "v2026.3.6" }]))
+      return
+    }
+
     if (path === "/repos/sipeed/picoclaw/releases/tags/v0.2.0") {
       response.setHeader("content-type", "application/json")
       response.end(
@@ -435,6 +456,12 @@ beforeAll(async () => {
           ],
         }),
       )
+      return
+    }
+
+    if (path === "/repos/sipeed/picoclaw/releases") {
+      response.setHeader("content-type", "application/json")
+      response.end(JSON.stringify([{ tag_name: "v0.2.0" }, { tag_name: "v0.1.9" }]))
       return
     }
 
@@ -458,9 +485,23 @@ beforeAll(async () => {
       return
     }
 
+    if (path === "/repos/zeroclaw-labs/zeroclaw/releases") {
+      response.setHeader("content-type", "application/json")
+      response.end(JSON.stringify([{ tag_name: "v0.1.7" }, { tag_name: "v0.1.6" }]))
+      return
+    }
+
     if (path === "/pypi/nanobot-ai/json") {
       response.setHeader("content-type", "application/json")
-      response.end(JSON.stringify({ info: { version: "0.1.4.post4" } }))
+      response.end(
+        JSON.stringify({
+          info: { version: "0.1.4.post4" },
+          releases: {
+            "0.1.4.post4": [],
+            "0.1.4.post3": [],
+          },
+        }),
+      )
       return
     }
 
@@ -641,6 +682,34 @@ describe("tier 2 clawctl cli", () => {
 
       const installedOutput = await runCli(root, ["list", "--installed"])
       expect(installedOutput).not.toContain("openclaw@")
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("remote versions", () => {
+  test.each([
+    ["nullclaw", ["v2026.3.7", "v2026.3.6"]],
+    ["openclaw", ["2026.3.7", "2026.3.6"]],
+    ["nanobot", ["0.1.4.post4", "0.1.4.post3"]],
+    ["nanoclaw", ["main"]],
+    ["piclaw", ["v0.3.0", "v0.2.9"]],
+  ])("lists remote versions for %s", async (implementation, expectedVersions) => {
+    const root = await createTempRoot()
+    try {
+      const output = await runCli(root, ["versions", implementation])
+      expect(output.split("\n")).toEqual(expectedVersions)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("rejects version-qualified targets", async () => {
+    const root = await createTempRoot()
+    try {
+      const output = await runCliExpectFailure(root, ["versions", "openclaw@2026.3.7"])
+      expect(output).toContain("versions target must not include a version")
     } finally {
       await rm(root, { recursive: true, force: true })
     }

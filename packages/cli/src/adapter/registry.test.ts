@@ -158,6 +158,15 @@ describe("adapter registry", () => {
     expect(nanoclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi" })).toEqual([])
     expect(bitclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi" })).toEqual([])
     expect(piclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi" })).toEqual([])
+    expect(nanoclaw.manifest.backends[0]?.install[0]?.versionSource).toEqual({
+      kind: "adapter-hook",
+      hook: "resolveVersions",
+    })
+    expect(piclaw.manifest.backends[1]?.install[0]?.versionSource).toEqual({
+      kind: "git-tags",
+      repository: "https://github.com/rcarmo/piclaw.git",
+    })
+    expect(nanoclaw.implementationHooks.resolveVersions).toBeDefined()
   })
 
   test("validates invalid adapter registrations", () => {

@@ -38,6 +38,7 @@ export type ClawctlApi = {
   stop: (input: MaybeTargetSelection) => Effect.Effect<void, ClawctlError>
   uninstall: (input: TargetSelection & { all: boolean }) => Effect.Effect<void, ClawctlError>
   use: (input: TargetSelection) => Effect.Effect<void, ClawctlError>
+  versions: (target: string) => Effect.Effect<void, ClawctlError>
 }
 
 export class ClawctlService extends Context.Tag("@clawctl/cli/ClawctlService")<ClawctlService, ClawctlApi>() {}
@@ -328,6 +329,18 @@ const clawctlServiceLayer = Layer.effect(
       yield* writeLine(`using ${activated.implementation}@${activated.resolvedVersion}`)
     })
 
+    const versions = EffectRuntime.fn("ClawctlService.versions")(function* (target: string) {
+      const parsed = yield* parseReference(target)
+      if (parsed.version) {
+        return yield* userError("service.versions", "versions target must not include a version")
+      }
+
+      const versions = yield* installer.listRemoteVersions(parsed.implementation)
+      for (const version of versions) {
+        yield* writeLine(version)
+      }
+    })
+
     return ClawctlService.of({
       chat,
       cleanup,
@@ -342,6 +355,7 @@ const clawctlServiceLayer = Layer.effect(
       stop,
       uninstall,
       use,
+      versions,
     })
   }),
 ).pipe(Layer.provide(dependencyLayer))

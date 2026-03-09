@@ -15,6 +15,7 @@ import type { RegisteredImplementation } from "./types.ts"
 
 type ImplementationHook = {
   buildChatCommand: (input: { binaryPath: string; message: string }) => string[]
+  resolveVersions?: () => Promise<ReadonlyArray<string>>
   renderConfig: (input: { config: Record<string, string>; workspaceDir: string }) => Promise<
     Array<{
       content: string
@@ -29,6 +30,7 @@ type AdapterRegistration = RegisteredImplementation & {
   hooks: {
     buildChatCommand: true
     normalizeChatOutput?: true
+    resolveVersions?: true
     renderConfig: true
     runtimeEnv: true
   }
@@ -112,11 +114,13 @@ function makeInstallOnlyHooks() {
   return {
     hooks: {
       buildChatCommand: true,
+      resolveVersions: true,
       renderConfig: true,
       runtimeEnv: true,
     },
     implementationHooks: {
       buildChatCommand: () => [],
+      resolveVersions: async () => ["main"],
       renderConfig: async () => [],
       runtimeEnv: () => ({}),
     },
@@ -156,7 +160,7 @@ function makeBootstrapRegistration(input: {
               repository: input.repository,
               refPolicy: "branch",
               bootstrapHook: "install",
-              versionSource: { kind: "static", versions: ["main"] },
+              versionSource: { kind: "adapter-hook", hook: "resolveVersions" },
               supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
             },
           ],
@@ -585,7 +589,7 @@ const piclawRegistration = {
             priority: 1,
             context: "https://github.com/rcarmo/piclaw.git",
             image: "piclaw",
-            versionSource: { kind: "static", versions: ["latest"] },
+            versionSource: { kind: "git-tags", repository: "https://github.com/rcarmo/piclaw.git" },
             supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
           },
         ],

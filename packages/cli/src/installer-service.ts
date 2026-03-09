@@ -30,6 +30,7 @@ type ClawctlInstallerApi = {
     implementation: string,
     version?: string,
   ) => Effect.Effect<InstallRecord, ClawctlError>
+  readonly listRemoteVersions: (implementation: string) => Effect.Effect<ReadonlyArray<string>, ClawctlError>
 }
 
 export class ClawctlInstallerService extends Context.Tag("@clawctl/cli/ClawctlInstallerService")<
@@ -47,10 +48,17 @@ const GithubReleaseResponseSchema = Schema.Struct({
   ),
 })
 
+const GithubReleaseListSchema = Schema.Array(
+  Schema.Struct({
+    tag_name: Schema.String,
+  }),
+)
+
 const PypiPackageResponseSchema = Schema.Struct({
   info: Schema.Struct({
     version: Schema.String,
   }),
+  releases: Schema.Record({ key: Schema.String, value: Schema.Unknown }),
 })
 
 const JsonStringSchema = Schema.parseJson(Schema.String)
@@ -103,20 +111,6 @@ export const ClawctlInstallerLive = Layer.effect(
         catch: (cause) =>
           userError("installer.requireHostPlatform", cause instanceof Error ? cause.message : String(cause)),
       })
-    })
-
-    const resolveStaticVersion = Effect.fn("ClawctlInstallerService.resolveStaticVersion")(function* (
-      versionSource: VersionSourceManifest,
-    ) {
-      if (versionSource.kind !== "static") {
-        return yield* userError("installer.resolveStaticVersion", "static version source is required")
-      }
-
-      const [first] = versionSource.versions
-      if (!first) {
-        return yield* userError("installer.resolveStaticVersion", "static version source has no versions")
-      }
-      return first
     })
 
     const requestJson = <A, I, R>(
@@ -344,6 +338,111 @@ export const ClawctlInstallerLive = Layer.effect(
       return version
     })
 
+    const listVersionsFromSource = Effect.fn("ClawctlInstallerService.listVersionsFromSource")(function* (
+      implementation: string,
+      versionSource: VersionSourceManifest,
+    ) {
+      switch (versionSource.kind) {
+        case "github-releases": {
+          const releases = yield* requestJson(
+            "installer.listGithubVersions",
+            `${githubApiOrigin()}/repos/${versionSource.repository}/releases`,
+            GithubReleaseListSchema,
+          )
+          return releases.map((release) => release.tag_name.trim()).filter((version) => version.length > 0)
+        }
+        case "npm": {
+          const stdout = yield* runCommand(
+            "installer.listNpmVersions",
+            npmExecutable(),
+            ["view", versionSource.packageName, "versions", "--json"],
+            {
+              env: process.env,
+            },
+          )
+          const source = stdout.trim()
+          if (source.length === 0) {
+            return yield* userError(
+              "installer.listNpmVersions",
+              `failed to resolve npm versions for ${versionSource.packageName}`,
+            )
+          }
+          const parsed = yield* withSystemError(
+            "installer.parseNpmVersions",
+            Schema.decodeUnknown(Schema.parseJson(Schema.Array(Schema.String)))(source),
+          )
+          return parsed.filter((version) => version.trim().length > 0)
+        }
+        case "pypi": {
+          const response = yield* requestJson(
+            "installer.listPythonVersions",
+            `${pypiApiOrigin()}/pypi/${versionSource.packageName}/json`,
+            PypiPackageResponseSchema,
+          )
+          return Object.keys(response.releases)
+            .filter((version) => version.trim().length > 0)
+            .sort((left, right) => right.localeCompare(left, undefined, { numeric: true, sensitivity: "base" }))
+        }
+        case "static":
+          return versionSource.versions
+        case "git-tags": {
+          const stdout = yield* runCommand(
+            "installer.listGitTagVersions",
+            gitExecutable(),
+            ["ls-remote", "--tags", "--refs", versionSource.repository],
+            {
+              env: process.env,
+            },
+          )
+          return stdout
+            .split(/\r?\n/u)
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0)
+            .map((line) => line.split(/\s+/u)[1] ?? "")
+            .filter((ref) => ref.startsWith("refs/tags/"))
+            .map((ref) => ref.replace("refs/tags/", ""))
+            .filter((version) => version.length > 0)
+            .sort((left, right) => right.localeCompare(left, undefined, { numeric: true, sensitivity: "base" }))
+        }
+        case "adapter-hook": {
+          if (versionSource.hook !== "resolveVersions") {
+            return yield* userError(
+              "installer.listVersionsFromSource",
+              `unsupported version hook: ${versionSource.hook}`,
+            )
+          }
+          const registration = yield* resolveRegistration(implementation)
+          const resolveVersions = registration.implementationHooks.resolveVersions
+          if (!resolveVersions) {
+            return yield* userError(
+              "installer.listVersionsFromSource",
+              `adapter does not implement resolveVersions: ${implementation}`,
+            )
+          }
+          return yield* Effect.tryPromise({
+            try: async () => [...(await resolveVersions())],
+            catch: (cause) =>
+              userError("installer.listVersionsFromSource", cause instanceof Error ? cause.message : String(cause)),
+          }).pipe(Effect.map((versions) => versions.filter((version) => version.trim().length > 0)))
+        }
+      }
+    })
+
+    const resolveDefaultVersion = Effect.fn("ClawctlInstallerService.resolveDefaultVersion")(function* (
+      implementation: string,
+      versionSource: VersionSourceManifest,
+    ) {
+      const versions = yield* listVersionsFromSource(implementation, versionSource)
+      const [first] = versions
+      if (!first) {
+        return yield* userError(
+          "installer.resolveDefaultVersion",
+          `no installable versions found for ${implementation}`,
+        )
+      }
+      return first
+    })
+
     const installGithubRelease = Effect.fn("ClawctlInstallerService.installGithubRelease")(function* (
       implementationId: string,
       supportTier: InstallRecord["supportTier"],
@@ -475,7 +574,8 @@ export const ClawctlInstallerLive = Layer.effect(
       strategy: RepoBootstrapInstallManifest,
       requestedVersion?: string,
     ) {
-      const resolvedVersion = requestedVersion ?? (yield* resolveStaticVersion(strategy.versionSource))
+      const resolvedVersion =
+        requestedVersion ?? (yield* resolveDefaultVersion(implementationId, strategy.versionSource))
       const stageRoot = partialInstallRoot(implementationId, resolvedVersion, stageToken())
       const repoDir = path.resolve(stageRoot, "repo")
       yield* withSystemError("installer.makeStageDir", fs.makeDirectory(stageRoot, { recursive: true }))
@@ -586,8 +686,36 @@ export const ClawctlInstallerLive = Layer.effect(
       return record
     })
 
+    const listRemoteVersions = Effect.fn("ClawctlInstallerService.listRemoteVersions")(function* (
+      implementation: string,
+    ) {
+      const registration = yield* resolveRegistration(implementation)
+      const backend = registration.manifest.backends.find((entry) => entry.supported && entry.install.length > 0)
+      if (!backend) {
+        return yield* userError(
+          "installer.listRemoteVersions",
+          `no supported install backend is configured for ${implementation}`,
+        )
+      }
+
+      const [strategy] = backend.install
+      if (!strategy) {
+        return yield* userError(
+          "installer.listRemoteVersions",
+          `install strategy is not configured for ${implementation}`,
+        )
+      }
+
+      const versions = yield* listVersionsFromSource(implementation, strategy.versionSource)
+      if (versions.length === 0) {
+        return yield* userError("installer.listRemoteVersions", `no remote versions found for ${implementation}`)
+      }
+      return versions
+    })
+
     return ClawctlInstallerService.of({
       installImplementation,
+      listRemoteVersions,
     })
   }),
 )
