@@ -24,6 +24,7 @@ export function bunExecutable(): string {
   return process.env.CLAWCTL_BUN_BIN ?? "bun"
 }
 
+/** @deprecated Use the Effect-based commandExists in ClawctlMaintenanceService instead. */
 export async function commandExists(command: string): Promise<boolean> {
   try {
     if (command.includes("/")) {
