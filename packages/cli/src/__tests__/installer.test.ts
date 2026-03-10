@@ -4,7 +4,11 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
 
-import { ClawctlInstallerService, rewritePythonScriptShebang } from "../installer-service.ts"
+import {
+  ClawctlInstallerService,
+  repairInstallRootReference,
+  rewritePythonScriptShebang,
+} from "../installer-service.ts"
 import { makeInstallerTestLayer, runWithLayer } from "../test-layer.ts"
 
 const tempRoots: string[] = []
@@ -38,6 +42,17 @@ describe("installer service", () => {
         "/tmp/install/venv/bin",
       ),
     ).toBe("#!/tmp/install/venv/bin/python\nprint('ok')\n")
+  })
+
+  test("repairInstallRootReference rewrites stale partial install references", () => {
+    const source =
+      "MAPPING={'hermes_cli': '/tmp/installs/local/hermes/main.partial-abc123/repo/hermes_cli'}\n" +
+      '#!/tmp/installs/local/hermes/main.partial-abc123/repo/venv/bin/python\n'
+
+    expect(repairInstallRootReference(source, "/tmp/installs/local/hermes/main")).toBe(
+      "MAPPING={'hermes_cli': '/tmp/installs/local/hermes/main/repo/hermes_cli'}\n" +
+        "#!/tmp/installs/local/hermes/main/repo/venv/bin/python\n",
+    )
   })
 
   test("installImplementation rewrites python entrypoints to the finalized venv", async () => {

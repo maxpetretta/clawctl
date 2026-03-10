@@ -95,6 +95,8 @@ describe("adapter registry", () => {
     const hermesFiles = await hermes.implementationHooks.renderConfig({ config, workspaceDir: "/tmp/workspace" })
 
     expect(nullFiles[0]?.content).toContain("/tmp/workspace")
+    expect(picoFiles[0]?.path).toBe("config.json")
+    expect(picoFiles[0]?.content).toContain('"model": "openai/test-model"')
     expect(picoFiles[0]?.content).toContain("test-model")
     expect(zeroFiles[0]?.content).toContain("default_model")
     expect(openFiles[0]?.content).toContain("openai-completions")
@@ -136,6 +138,7 @@ describe("adapter registry", () => {
       }),
     ).toEqual({
       HOME: "/tmp/home",
+      OPENCLAW_HOME: "/tmp/home",
       OPENCLAW_CONFIG_PATH: "/tmp/home/.openclaw/openclaw.json",
       OPENCLAW_STATE_DIR: "/tmp/runtime/state",
       NODE_ENV: "production",

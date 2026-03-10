@@ -12,7 +12,7 @@
   "model_list": [
     {
       "model_name": "bench",
-      "model": "{{CLAW_MODEL}}",
+      "model": "{{PICOCLAW_MODEL}}",
       "api_base": "{{CLAW_BASE_URL}}",
       "api_key": "{{CLAW_API_KEY}}",
       "request_timeout": 300

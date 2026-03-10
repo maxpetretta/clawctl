@@ -12,7 +12,7 @@ import { installOnlyInteractionMessage, isInstallOnlyRegistration } from "./adap
 import type { RuntimeManifest } from "./adapter/schema.ts"
 import type { InstallRecord, RegisteredImplementation, RuntimeRecord } from "./adapter/types.ts"
 import { type ClawctlError, userError, withSystemError } from "./errors.ts"
-import { repairPythonScriptShebang } from "./installer-service.ts"
+import { repairInstallRootReference, repairPythonScriptShebang } from "./installer-service.ts"
 import { isRuntimeBackend, type RuntimeBackend } from "./model.ts"
 import { ClawctlPathsLive, ClawctlPathsService } from "./paths-service.ts"
 import {
@@ -563,6 +563,69 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
     const repairPythonEntrypoints = Effect.fn("ClawctlRuntimeService.repairPythonEntrypoints")(function* (
       record: InstallRecord,
     ) {
+      if (record.installStrategy === "repo-bootstrap") {
+        const rewriteTextFile = Effect.fn("ClawctlRuntimeService.repairRepoBootstrapTextFile")(function* (
+          filePath: string,
+          executable = false,
+        ) {
+          const exists = yield* withSystemError("runtime.statRepoBootstrapPath", fs.exists(filePath))
+          if (!exists) {
+            return
+          }
+          const source = yield* withSystemError("runtime.readRepoBootstrapPath", fs.readFileString(filePath))
+          const repaired = repairInstallRootReference(source, record.installRoot)
+          if (repaired === source) {
+            return
+          }
+          yield* withSystemError("runtime.writeRepoBootstrapPath", fs.writeFileString(filePath, repaired))
+          if (executable) {
+            yield* withSystemError("runtime.chmodRepoBootstrapPath", fs.chmod(filePath, 0o755))
+          }
+        })
+
+        const venvRoot = path.resolve(record.installRoot, "repo", "venv")
+        const binDir = path.resolve(venvRoot, "bin")
+        const binDirExists = yield* withSystemError("runtime.statRepoBootstrapBinDir", fs.exists(binDir))
+        if (binDirExists) {
+          const binEntries = yield* withSystemError("runtime.readRepoBootstrapBinDir", fs.readDirectory(binDir))
+          for (const entry of binEntries) {
+            yield* rewriteTextFile(path.resolve(binDir, entry), true)
+          }
+        }
+
+        const libDir = path.resolve(venvRoot, "lib")
+        const libDirExists = yield* withSystemError("runtime.statRepoBootstrapLibDir", fs.exists(libDir))
+        if (!libDirExists) {
+          return
+        }
+
+        const pythonDirs = yield* withSystemError("runtime.readRepoBootstrapLibDir", fs.readDirectory(libDir))
+        for (const pythonDir of pythonDirs) {
+          const sitePackagesDir = path.resolve(libDir, pythonDir, "site-packages")
+          const sitePackagesExists = yield* withSystemError(
+            "runtime.statRepoBootstrapSitePackages",
+            fs.exists(sitePackagesDir),
+          )
+          if (!sitePackagesExists) {
+            continue
+          }
+          const sitePackagesEntries = yield* withSystemError(
+            "runtime.readRepoBootstrapSitePackages",
+            fs.readDirectory(sitePackagesDir),
+          )
+          for (const entry of sitePackagesEntries) {
+            if (entry.endsWith(".pth") || (entry.startsWith("__editable__") && entry.endsWith(".py"))) {
+              yield* rewriteTextFile(path.resolve(sitePackagesDir, entry))
+              continue
+            }
+            if (entry.endsWith(".dist-info")) {
+              yield* rewriteTextFile(path.resolve(sitePackagesDir, entry, "direct_url.json"))
+            }
+          }
+        }
+        return
+      }
+
       if (record.installStrategy !== "python-package") {
         return
       }

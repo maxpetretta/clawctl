@@ -103,6 +103,23 @@ export function repairPythonScriptShebang(source: string, installedInterpreterDi
   return `${repairedFirstLine}${source.slice(firstLine.length)}`
 }
 
+export function rewriteInstallRootReference(source: string, fromRoot: string, toRoot: string) {
+  return source.includes(fromRoot) ? source.replaceAll(fromRoot, toRoot) : source
+}
+
+export function repairInstallRootReference(source: string, installedRoot: string) {
+  const normalizedInstalledRoot = installedRoot.endsWith("/") ? installedRoot.slice(0, -1) : installedRoot
+  const lastSlashIndex = normalizedInstalledRoot.lastIndexOf("/")
+  if (lastSlashIndex <= 0) {
+    return source
+  }
+
+  const parentDir = normalizedInstalledRoot.slice(0, lastSlashIndex).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")
+  const leafName = normalizedInstalledRoot.slice(lastSlashIndex + 1).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")
+  const stageRootPattern = new RegExp(`${parentDir}/${leafName}\\.partial-[^\\s"'\\n/]+`, "gu")
+  return source.replace(stageRootPattern, normalizedInstalledRoot)
+}
+
 function rewriteInstallRootPaths(paths: ReadonlyArray<string>, fromRoot: string, toRoot: string): string[] {
   const normalizedFromRoot = fromRoot.endsWith("/") ? fromRoot : `${fromRoot}/`
   return paths.map((entry) => {
@@ -374,6 +391,71 @@ export const ClawctlInstallerLive = Layer.effect(
       return destinationRoot
     })
 
+    const rewriteRepoBootstrapInstallReferences = Effect.fn(
+      "ClawctlInstallerService.rewriteRepoBootstrapInstallReferences",
+    )(function* (stageRoot: string, installRootPath: string) {
+      const rewriteTextFile = Effect.fn("ClawctlInstallerService.rewriteRepoBootstrapTextFile")(function* (
+        filePath: string,
+        executable = false,
+      ) {
+        const exists = yield* withSystemError("installer.statRepoBootstrapPath", fs.exists(filePath))
+        if (!exists) {
+          return
+        }
+        const source = yield* withSystemError("installer.readRepoBootstrapPath", fs.readFileString(filePath))
+        const rewritten = rewriteInstallRootReference(source, stageRoot, installRootPath)
+        if (rewritten === source) {
+          return
+        }
+        yield* withSystemError("installer.writeRepoBootstrapPath", fs.writeFileString(filePath, rewritten))
+        if (executable) {
+          yield* withSystemError("installer.chmodRepoBootstrapPath", fs.chmod(filePath, 0o755))
+        }
+      })
+
+      const venvRoot = path.resolve(installRootPath, "repo", "venv")
+      const binDir = path.resolve(venvRoot, "bin")
+      const binDirExists = yield* withSystemError("installer.statRepoBootstrapBinDir", fs.exists(binDir))
+      if (binDirExists) {
+        const binEntries = yield* withSystemError("installer.readRepoBootstrapBinDir", fs.readDirectory(binDir))
+        for (const entry of binEntries) {
+          yield* rewriteTextFile(path.resolve(binDir, entry), true)
+        }
+      }
+
+      const libDir = path.resolve(venvRoot, "lib")
+      const libDirExists = yield* withSystemError("installer.statRepoBootstrapLibDir", fs.exists(libDir))
+      if (!libDirExists) {
+        return
+      }
+
+      const pythonDirs = yield* withSystemError("installer.readRepoBootstrapLibDir", fs.readDirectory(libDir))
+      for (const pythonDir of pythonDirs) {
+        const sitePackagesDir = path.resolve(libDir, pythonDir, "site-packages")
+        const sitePackagesExists = yield* withSystemError(
+          "installer.statRepoBootstrapSitePackages",
+          fs.exists(sitePackagesDir),
+        )
+        if (!sitePackagesExists) {
+          continue
+        }
+
+        const sitePackagesEntries = yield* withSystemError(
+          "installer.readRepoBootstrapSitePackages",
+          fs.readDirectory(sitePackagesDir),
+        )
+        for (const entry of sitePackagesEntries) {
+          if (entry.endsWith(".pth") || (entry.startsWith("__editable__") && entry.endsWith(".py"))) {
+            yield* rewriteTextFile(path.resolve(sitePackagesDir, entry))
+            continue
+          }
+          if (entry.endsWith(".dist-info")) {
+            yield* rewriteTextFile(path.resolve(sitePackagesDir, entry, "direct_url.json"))
+          }
+        }
+      }
+    })
+
     const rewriteInstalledPythonEntrypoints = Effect.fn("ClawctlInstallerService.rewriteInstalledPythonEntrypoints")(
       function* (stageRoot: string, installRootPath: string, entrypoint: string) {
         const stageInterpreterDir = path.resolve(stageRoot, "venv", "bin")
@@ -620,6 +702,7 @@ export const ClawctlInstallerLive = Layer.effect(
       const binaryPath = path.resolve(stageRoot, "node_modules", ".bin", strategy.binName)
       yield* withSystemError("installer.checkNpmBinary", fs.access(binaryPath))
       const installRootPath = yield* finalizeInstall(stageRoot, implementationId, resolvedVersion, "local")
+      yield* rewriteRepoBootstrapInstallReferences(stageRoot, installRootPath)
       const hostPlatform = yield* requireHostPlatform()
 
       return createInstallRecord(implementationId, supportTier, {

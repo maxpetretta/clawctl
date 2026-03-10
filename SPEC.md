@@ -177,6 +177,7 @@ Current shared config keys:
 - `CLAW_API_KEY`
 - `CLAW_BASE_URL`
 - `CLAW_MODEL`
+- `CLAW_RUNTIME`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_BOT_USERNAME`
 - `TELEGRAM_CHAT_ID`
@@ -186,6 +187,7 @@ Current defaults:
 
 - `CLAW_BASE_URL=https://openrouter.ai/api/v1`
 - `CLAW_MODEL=moonshotai/kimi-k2.5`
+- `CLAW_RUNTIME=local`
 - `CLAW_API_KEY=replace-me`
 
 Implementation notes:

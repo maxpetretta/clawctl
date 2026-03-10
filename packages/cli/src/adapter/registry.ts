@@ -262,6 +262,90 @@ function picoclawTelegramBlock(config: Record<string, string>): string {
     }`
 }
 
+const picoclawKnownModelVendors = new Set([
+  "openai",
+  "anthropic",
+  "zhipu",
+  "deepseek",
+  "gemini",
+  "groq",
+  "moonshot",
+  "qwen",
+  "nvidia",
+  "ollama",
+  "openrouter",
+  "litellm",
+  "vllm",
+  "cerebras",
+  "volcengine",
+  "shengsuanyun",
+  "vivgrid",
+  "antigravity",
+  "github-copilot",
+])
+
+function picoclawModelId(config: Record<string, string>): string {
+  const rawModel = config.CLAW_MODEL?.trim() ?? ""
+  if (!rawModel) {
+    return rawModel
+  }
+
+  const vendorCandidate = rawModel.split("/", 1)[0]
+  if (vendorCandidate && picoclawKnownModelVendors.has(vendorCandidate)) {
+    return rawModel
+  }
+
+  const rawBaseUrl = config.CLAW_BASE_URL?.trim()
+  if (rawBaseUrl) {
+    try {
+      const url = new URL(rawBaseUrl)
+      const host = url.hostname.toLowerCase()
+      if (host === "openrouter.ai") {
+        return `openrouter/${rawModel}`
+      }
+      if (host === "api.openai.com") {
+        return `openai/${rawModel}`
+      }
+      if (host === "open.bigmodel.cn") {
+        return `zhipu/${rawModel}`
+      }
+      if (host === "api.deepseek.com") {
+        return `deepseek/${rawModel}`
+      }
+      if (host === "generativelanguage.googleapis.com") {
+        return `gemini/${rawModel}`
+      }
+      if (host === "api.groq.com") {
+        return `groq/${rawModel}`
+      }
+      if (host === "api.moonshot.cn") {
+        return `moonshot/${rawModel}`
+      }
+      if (host === "dashscope.aliyuncs.com") {
+        return `qwen/${rawModel}`
+      }
+      if (host === "integrate.api.nvidia.com") {
+        return `nvidia/${rawModel}`
+      }
+      if (host === "localhost" || host === "127.0.0.1") {
+        if (url.port === "11434") {
+          return `ollama/${rawModel}`
+        }
+        if (url.port === "4000") {
+          return `litellm/${rawModel}`
+        }
+        if (url.port === "8000") {
+          return `vllm/${rawModel}`
+        }
+      }
+    } catch {
+      return `openai/${rawModel}`
+    }
+  }
+
+  return `openai/${rawModel}`
+}
+
 function zeroclawTelegramBlock(config: Record<string, string>): string {
   const telegram = resolveTelegramSettings(config)
   if (!telegram.enabled) {
@@ -589,7 +673,7 @@ const picoclawRegistration = {
     }),
     config: makeConfig([
       {
-        path: ".picoclaw/config.json",
+        path: "config.json",
         format: "json",
         template: { kind: "file", path: resolve(templateDir, "picoclaw.config.json.template") },
         requiredKeys: [...sharedKeys],
@@ -648,9 +732,10 @@ const picoclawRegistration = {
     ],
     renderConfig: async ({ config, workspaceDir }) => [
       {
-        path: ".picoclaw/config.json",
+        path: "config.json",
         content: await renderTemplate("picoclaw.config.json.template", {
           ...config,
+          PICOCLAW_MODEL: picoclawModelId(config),
           PICOCLAW_TELEGRAM_BLOCK: picoclawTelegramBlock(config),
           WORKSPACE_DIR: workspaceDir,
         }),
@@ -874,6 +959,7 @@ const openclawRegistration = {
     ],
     runtimeEnv: ({ homeDir, stateDir }) => ({
       HOME: homeDir,
+      OPENCLAW_HOME: homeDir,
       OPENCLAW_CONFIG_PATH: resolve(homeDir, ".openclaw", "openclaw.json"),
       OPENCLAW_STATE_DIR: stateDir,
       NODE_ENV: "production",
@@ -888,6 +974,7 @@ const openclawRegistration = {
         args: ["gateway", "run", "--port", String(port), "--allow-unconfigured", "--force"],
         env: {
           HOME: homeDir,
+          OPENCLAW_HOME: homeDir,
           OPENCLAW_CONFIG_PATH: resolve(homeDir, ".openclaw", "openclaw.json"),
           OPENCLAW_STATE_DIR: stateDir,
           NODE_ENV: "production",
