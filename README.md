@@ -11,17 +11,18 @@ The product shape is closer to `mise` or `nvm` than to a benchmark harness.
 Implemented today:
 
 - Bun + Effect CLI in [`packages/cli`](packages/cli)
-- local backend only
-- shared root under `~/.clawctl` by default
+- shared root under `~/.clawctl` by default, with env overrides
+- local backend execution plus Docker metadata/validation only
 - shared config plus isolated per-runtime state
-- install, list, versions, use, current, doctor, cleanup, status, ping, chat, uninstall, and config flows
+- active shims under `~/.clawctl/bin/`
+- install, list, versions, use, current, doctor, cleanup, init, status, ping, chat, stop, uninstall, and config flows
 
 Current limits:
 
 - supported host platform: `darwin-arm64`
 - `docker` is modeled but not implemented yet
-- `nanoclaw` still cannot handle `chat` or `ping` because upstream does not expose a stable local loopback transport
-- `piclaw` and `ironclaw` are not fully activatable yet
+- `nanoclaw`, `bitclaw`, and `ironclaw` are still install-only in `clawctl`
+- `piclaw` remains Docker-first metadata only
 
 ## Supported Claws
 
@@ -32,14 +33,18 @@ Fully supported:
 
 Registered with limits:
 
+- `hermes`
+  - bootstrap-backed local adapter
+  - supports managed `use`, `status`, `stop`, `chat`, and `ping`
 - `nanoclaw`
-  - bootstrap-backed native daemon supervision works for `install`, `use`, `status`, and `stop`
-  - `chat` and `ping` are not available because upstream does not expose a stable local loopback or host-side chat transport
+  - bootstrap-backed local install target
+  - installable, but not activatable or interactable through `clawctl`
 - `bitclaw`
-  - bootstrap-backed native daemon supervision works for `install`, `use`, `status`, `stop`, `chat`, and `ping`
+  - bootstrap-backed local install target
+  - installable, but not activatable or interactable through `clawctl`
 - `ironclaw`
   - release-backed install metadata works
-  - not activatable through the current managed runtime flow
+  - installable, but not activatable through the current managed runtime flow
 - `piclaw`
   - Docker-first metadata only
   - `versions` and `doctor` work
@@ -79,6 +84,7 @@ bun run cli config set TELEGRAM_BOT_TOKEN 123456:ABCDEF...
 bun run cli install openclaw
 bun run cli use openclaw
 bun run cli chat "Summarize the current workspace."
+bun run cli stop
 ```
 
 ## Development
@@ -140,6 +146,12 @@ When you run `clawctl use ...`, it also updates active shims under `~/.clawctl/b
 - `<active-implementation>`
 
 Add that directory to `PATH` if you want the active claw CLI to resolve natively.
+
+You can also let `clawctl` append the PATH setup for supported shells:
+
+```bash
+bun run cli init
+```
 
 ## Documentation
 

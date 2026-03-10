@@ -30,10 +30,10 @@ It:
 Current implementation limits:
 
 - host platform: `darwin-arm64`
-- backend: `local` only
+- backend: local execution only; Docker is metadata-only
 - `docker` is parsed in the CLI but not implemented
 - the active claw shim directory must be on `PATH` if the user expects native command resolution
-- `ironclaw` is still install-only
+- `nanoclaw`, `bitclaw`, and `ironclaw` are still install-only
 
 ## Claws Available
 
@@ -44,11 +44,15 @@ Fully supported today:
 
 Registered with limits:
 
+- `hermes`
+  - bootstrap-backed local adapter
+  - supports managed `use`, `status`, `stop`, `chat`, and `ping`
 - `nanoclaw`
-  - bootstrap-backed native daemon supervision works for `install`, `use`, `status`, and `stop`
-  - `chat` and `ping` are not implemented because upstream does not expose a stable local loopback or host-side chat transport
+  - bootstrap-backed local install target
+  - installable, but not activatable or interactable through `clawctl`
 - `bitclaw`
-  - bootstrap-backed native daemon supervision works for `install`, `use`, `status`, `stop`, `chat`, and `ping`
+  - bootstrap-backed local install target
+  - installable, but not activatable or interactable through `clawctl`
 - `ironclaw`
   - release-backed install metadata works
   - not activatable through the current managed runtime flow
@@ -140,7 +144,7 @@ Behavior:
 
 - `use` auto-installs the target if it is missing
 - only one claw is active at a time
-- `use` stops the previous managed runtime, starts the selected one, and then updates `current.json`
+- `use` stops the previous managed runtime, starts the selected one when it is interactable, and then updates `current.json`
 
 ### Send a quick message
 
@@ -183,6 +187,14 @@ Use these when:
 - a current selection is stale
 - partial installs or orphaned runtime directories need cleanup
 
+### Initialize PATH setup
+
+```bash
+clawctl init
+clawctl init zsh
+clawctl init fish
+```
+
 ### Remove installs
 
 ```bash
@@ -198,9 +210,9 @@ When helping with `clawctl`:
 - Use `clawctl versions <implementation>` before assuming a version exists upstream.
 - Use `clawctl doctor` before guessing why an install or runtime path is broken.
 - Treat `docker` as not implemented today.
-- Treat `ironclaw` and `piclaw` as limited.
-- Treat `nanoclaw` as startable but not messageable through `clawctl`.
-- Treat `bitclaw` as messageable through `clawctl`, but remember that it uses host-side IPC rather than a simple CLI chat command.
+- Treat `nanoclaw`, `bitclaw`, and `ironclaw` as install-only.
+- Treat `piclaw` as Docker-first metadata only.
+- Prefer `hermes` over the install-only Tier 3 entries when the user needs a bootstrap-backed interactable claw.
 - Do not claim Telegram transport is working through `clawctl` yet.
 - Do say that shared Telegram config is rendered or exported into adapters that support it.
 - `stop` is real for the current managed local backend.
@@ -221,6 +233,7 @@ clawctl versions <implementation>
 clawctl install <implementation>[@version]
 clawctl use <implementation>[@version]
 clawctl current
+clawctl init [<shell>]
 clawctl doctor [<implementation>]
 clawctl status [<implementation>]
 clawctl ping [<implementation>]

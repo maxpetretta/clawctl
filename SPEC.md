@@ -4,7 +4,7 @@
 
 `clawctl` is a local claw runtime manager.
 
-It installs supported claw implementations under a shared root, keeps one active claw selection, renders per-claw runtime config from shared credentials, and exposes a small pass-through CLI for install, selection, managed local runtime lifecycle, health checks, and chat.
+It installs supported claw implementations under a shared root, keeps one active claw selection, renders per-claw runtime config from shared credentials, and exposes a small CLI for install, selection, managed local runtime lifecycle, health checks, and chat.
 
 The product shape is closer to `nvm` or `mise` than to the original benchmark harness.
 
@@ -15,17 +15,21 @@ This spec reflects the codebase as currently implemented.
 Implemented today:
 
 - Effect-native Bun CLI built on `@effect/cli`
-- shared install root under `~/.clawctl` by default
-- local backend only
+- shared install root under `~/.clawctl` by default, with `CLAWCTL_ROOT` / `CLAWCTL_STATE_DIR` overrides
+- local backend execution plus Docker metadata and validation only
 - adapter registry with Tier 1, Tier 2, and Tier 3 entries
 - immutable install records plus isolated runtime directories
 - shared config file plus active-selection file
-- install, uninstall, list, use, current, doctor, cleanup, status, ping, chat, stop, and config commands
+- active shims under `~/.clawctl/bin/`
+- install, uninstall, use, current, cleanup, init, list, versions, doctor, status, ping, chat, stop, and config commands
+- compact custom root help output with examples
+- managed native-daemon and proxy-daemon runtime flows where the adapter supports them
 
 Modeled but not implemented yet:
 
-- Docker runtime backend
-- richer help text and examples
+- Docker install/runtime execution
+- `source-build` install strategy
+- broader host-platform support
 
 ## Goals
 
@@ -76,7 +80,9 @@ clawctl uninstall [--all] [--runtime local|docker] <target>
 clawctl use [--runtime local|docker] <target>
 clawctl current
 clawctl cleanup [<target>]
+clawctl init [<shell>]
 clawctl list [--installed]
+clawctl versions <target>
 clawctl doctor [<target>]
 clawctl status [<target>]
 clawctl ping [<target>]
@@ -89,11 +95,15 @@ clawctl config set <key> <value>
 Notes on current behavior:
 
 - `target` means `<implementation>` or `<implementation>@<version>`.
+- running `clawctl` or `clawctl --help` prints the custom compact root help instead of the raw `@effect/cli` root help.
+- `config` without a subcommand prints a short usage hint.
 - `chat`, `ping`, and `status` default to the active claw when no target is provided.
+- `list --installed` prints only installed versions; plain `list` prints one line per registered implementation with either installed versions or `not installed`.
+- `versions` lists remote or adapter-defined installable versions and rejects version-qualified targets.
+- `init` appends PATH setup for `bash`, `zsh`, or `fish` if the line is not already present.
 - `use` auto-installs the target if it is missing locally.
-- `chat` and `ping` activate the selected record before running.
 - `cleanup` and `doctor` accept implementation targets, but `cleanup` rejects version-qualified targets.
-- `use` auto-installs missing targets, stops the previous managed runtime, starts the new one, and then updates `current.json`.
+- `use` auto-installs missing targets, stops the previous managed runtime, starts the new one when the adapter is interactable, and then updates `current.json`.
 - `chat` and `ping` auto-activate the selected record before running.
 - `status` reports live runtime state, including managed runtime PID and port when available.
 - `stop` terminates the managed local runtime for the selected or active claw.
@@ -111,13 +121,16 @@ Current layout:
 
 ```text
 ~/.clawctl/
-  config/
-    current.json
-    shared.env
+  bin/
+    claw
+    <implementation>
   cache/
     downloads/
       <implementation>/
         <version>/
+  config/
+    current.json
+    shared.env
   installs/
     local/
       <implementation>/
@@ -129,6 +142,8 @@ Current layout:
     local/
       <implementation>/
         <version>/
+          runtime.json
+          service.log
           home/
           state/
           workspace/
@@ -140,8 +155,10 @@ Rules:
 - `runtimes/` is mutable, per-version runtime state.
 - `config/current.json` stores the active implementation, version, and backend.
 - `config/shared.env` stores the shared config source of truth.
+- `bin/claw` and `bin/<implementation>` are rewritten active shims that route back through `clawctl`.
 - adapter-rendered native config lives under the runtime `home/` subtree.
-- managed runtime metadata lives under the runtime root and includes runtime state, PID, and port.
+- managed runtime metadata lives under the runtime root and includes runtime state, PID, port, and log output.
+- the top-level `logs/` directory is currently provisioned but per-runtime logs live under `runtimes/.../service.log`.
 
 ## Shared Configuration
 
@@ -171,22 +188,24 @@ Implementation notes:
 
 ## Runtime Model
 
-Current runtime model is local and managed through supervised daemons.
+Current runtime support is a mix of managed and install-only local adapters.
 
-For claws that support activation:
+For interactable local adapters:
 
-- `use` stops the previous managed runtime, starts the selected one, and writes the active selection
-- runtime config is rendered into `runtimes/local/<impl>/<version>/home`
-- `use` also rewrites `~/.clawctl/bin/claw` and `~/.clawctl/bin/<implementation>`
-- claws run either as native supervised daemons or through a clawctl-managed proxy daemon, depending on the adapter
-- `chat`, `ping`, and `status` target the active managed daemon path for that adapter
+- `nullclaw`, `picoclaw`, `zeroclaw`, `openclaw`, `nanobot`, and `hermes` support activation through `use`
+- `use` stops the previous managed runtime, renders config into `runtimes/local/<impl>/<version>/home`, rewrites active shims, updates `current.json`, and starts the selected runtime when needed
+- runtimes run either as native supervised daemons or through a clawctl-managed proxy daemon, depending on the adapter
+- `chat`, `ping`, and `status` target the selected or active runtime path for that adapter
+
+For install-only adapters:
+
+- `nanoclaw`, `bitclaw`, and `ironclaw` are installable locally but reject activation and interaction
+- `piclaw` is modeled as Docker-first metadata and also remains install-only on the shipped path
 
 Current lifecycle limitations:
 
 - Docker lifecycle is not implemented
-- `ironclaw` is still install-only
-- `piclaw` still requires a Docker backend
-- supported release and bootstrap claws can now run under native daemon supervision
+- install-only adapters do not support `use`, `chat`, `ping`, shim execution, or runtime management
 
 ## Adapter Model
 
@@ -220,7 +239,7 @@ Not implemented on the live installer path:
 
 - `docker-build`
 - `source-build`
-- other Python installer modes
+- `python-package` installers other than `uv-tool`
 
 Each adapter currently supplies implementation hooks for:
 
@@ -250,6 +269,7 @@ These are package-managed local adapters and are also supported by the current m
 
 Tier 3:
 
+- `hermes`
 - `nanoclaw`
 - `bitclaw`
 - `ironclaw`
@@ -257,14 +277,11 @@ Tier 3:
 
 Current Tier 3 behavior:
 
-- `nanoclaw` and `bitclaw` are installable through `repo-bootstrap`
-- `nanoclaw` supports `use`, `status`, and `stop` through native daemon supervision
-- `nanoclaw` does not support `chat` or `ping` because upstream does not expose a stable local loopback or host-side chat transport
-- `bitclaw` supports `use`, `status`, `stop`, `chat`, and `ping` through its host-side IPC transport
+- `hermes` is installable through `repo-bootstrap` and supports managed local `use`, `status`, `stop`, `chat`, and `ping`
+- `nanoclaw` and `bitclaw` are installable through `repo-bootstrap` but are still install-only in clawctl
 - `ironclaw` is installable through a release-backed local adapter
 - `ironclaw` is not activatable through `use`
-- `piclaw` is registered as Docker-first metadata only
-- `doctor piclaw` works, but Docker execution is not implemented
+- `piclaw` is registered as Docker-first metadata only; `doctor` and `versions` work, but Docker execution is not implemented
 
 ## Install and Version Behavior
 
@@ -294,6 +311,7 @@ Install metadata persisted per installed version:
 `doctor` currently verifies:
 
 - registry validity
+- shim PATH setup and active shim presence when relevant
 - backend platform compatibility for the host
 - required host tools for each install strategy
 - required shared config keys
@@ -310,9 +328,9 @@ Install metadata persisted per installed version:
 The main gaps between the adapter model and shipped behavior are:
 
 - Docker backend is specified but not runnable
-- help output is minimally customized
-- no real daemon start/stop lifecycle
-- no Telegram runtime integration yet
+- `source-build` and Docker install strategies are modeled but not executed by the live installer
+- non-`uv-tool` Python installer modes are modeled but not executed by the live installer
+- Telegram-related shared config is rendered for supported adapters, but `clawctl` does not own or proxy Telegram transport itself
 - no first-class support beyond `darwin-arm64`
 
 ## Source of Truth

@@ -12,6 +12,7 @@ Current implementation status:
 - runtime backend: `local`
 - command runtime: Bun + Effect
 - install root: `~/.clawctl` by default
+- root help is custom-rendered for a compact command overview
 
 Supported today:
 
@@ -20,9 +21,9 @@ Supported today:
 
 Registered but limited:
 
-- Tier 3: `nanoclaw`, `bitclaw`, `ironclaw`, `piclaw`
-- `nanoclaw` supports `install`, `use`, `status`, and `stop`, but not `chat` or `ping`
-- `bitclaw` supports `install`, `use`, `status`, `stop`, `chat`, and `ping`
+- Tier 3: `hermes`, `nanoclaw`, `bitclaw`, `ironclaw`, `piclaw`
+- `hermes` supports managed `install`, `use`, `status`, `stop`, `chat`, and `ping`
+- `nanoclaw` and `bitclaw` are installable bootstrap targets, but still install-only in `clawctl`
 - `ironclaw` is installable but not activatable through the current managed runtime flow
 - `piclaw` is Docker-first metadata only; Docker execution is not implemented yet
 
@@ -32,6 +33,12 @@ From the repo root:
 
 ```bash
 bun run cli --help
+```
+
+Show the compact root help directly:
+
+```bash
+bun run cli
 ```
 
 From this package directly:
@@ -152,6 +159,8 @@ clawctl current
 - `~/.clawctl/bin/claw`
 - `~/.clawctl/bin/<active-implementation>`
 
+Install-only adapters fail fast on `use` rather than pretending to support activation.
+
 ### 5. Talk To The Active Claw
 
 Send a prompt to the current managed runtime:
@@ -178,7 +187,22 @@ Notes:
 - supported claws run behind a clawctl-managed local background runtime under `~/.clawctl/runtimes/local/...`
 - unsupported claws fail clearly instead of pretending to support chat
 
-### 6. Check Health And State
+### 6. Initialize PATH Setup
+
+Append clawctl shim setup for the current shell:
+
+```bash
+clawctl init
+```
+
+Or target a shell explicitly:
+
+```bash
+clawctl init zsh
+clawctl init fish
+```
+
+### 7. Check Health And State
 
 Run environment and install diagnostics:
 
@@ -196,7 +220,7 @@ clawctl status
 clawctl status openclaw
 ```
 
-### 7. Remove Installs And Stale State
+### 8. Remove Installs And Stale State
 
 Remove one installed version:
 
@@ -223,6 +247,9 @@ By default, `clawctl` stores everything under:
 
 ```text
 ~/.clawctl/
+  bin/
+    claw
+    <implementation>
   config/
     current.json
     shared.env
@@ -235,6 +262,8 @@ By default, `clawctl` stores everything under:
     local/
       <implementation>/
         <version>/
+          runtime.json
+          service.log
           home/
           state/
           workspace/
@@ -255,6 +284,7 @@ clawctl uninstall [--all] [--runtime local|docker] <target>
 clawctl use [--runtime local|docker] <target>
 clawctl current
 clawctl cleanup [<target>]
+clawctl init [<shell>]
 clawctl list [--installed]
 clawctl versions <implementation>
 clawctl doctor [<target>]
@@ -269,6 +299,8 @@ clawctl config set <key> <value>
 Current caveats:
 
 - `--runtime docker` is parsed but not implemented yet
-- `nanoclaw` can be activated but does not support `chat` or `ping` because upstream does not expose a stable local loopback or host-side chat transport
-- `ironclaw` is still install-only
+- `nanoclaw`, `bitclaw`, and `ironclaw` are still install-only
+- `piclaw` is metadata-only until Docker execution exists
 - only `darwin-arm64` is supported right now
+
+If you need the implementation-aligned product spec, see [`../../SPEC.md`](../../SPEC.md).
