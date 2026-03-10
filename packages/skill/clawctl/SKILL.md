@@ -18,22 +18,20 @@ Do not use this skill for generic coding tasks outside the `clawctl` workflow.
 
 ## What clawctl Is
 
-`clawctl` is a local runtime manager for claws.
+`clawctl` is a runtime manager for claws.
 
 It:
 
 - installs claws into a private versioned store under `~/.clawctl`
 - keeps one active claw selection at a time
 - renders isolated runtime config from shared credentials
-- starts a clawctl-managed local runtime for supported claws
+- starts a clawctl-managed runtime for supported claws
 
 Current implementation limits:
 
 - host platform: `darwin-arm64`
-- backend: local execution only; Docker is metadata-only
-- `docker` is parsed in the CLI but not implemented
+- backend-aware install/runtime support exists for both `local` and `docker`
 - the active claw shim directory must be on `PATH` if the user expects native command resolution
-- `nanoclaw`, `bitclaw`, and `ironclaw` are still install-only
 
 ## Claws Available
 
@@ -45,21 +43,8 @@ Fully supported today:
 Registered with limits:
 
 - `hermes`
-  - bootstrap-backed local adapter
+  - bootstrap-backed adapter
   - supports managed `use`, `status`, `stop`, `chat`, and `ping`
-- `nanoclaw`
-  - bootstrap-backed local install target
-  - installable, but not activatable or interactable through `clawctl`
-- `bitclaw`
-  - bootstrap-backed local install target
-  - installable, but not activatable or interactable through `clawctl`
-- `ironclaw`
-  - release-backed install metadata works
-  - not activatable through the current managed runtime flow
-- `piclaw`
-  - Docker-first metadata only
-  - `versions` and `doctor` work
-  - Docker execution is not implemented
 
 Practical rule:
 
@@ -128,7 +113,7 @@ clawctl install picoclaw@v0.2.0
 
 Notes:
 
-- installs are versioned and private under `~/.clawctl/installs/local/<implementation>/<version>/`
+- installs are versioned and private under `~/.clawctl/installs/<backend>/<implementation>/<version>/`
 - `openclaw` installs into a private npm prefix managed by `clawctl`
 - `nanobot` installs into a private `uv tool` directory managed by `clawctl`
 
@@ -209,13 +194,11 @@ When helping with `clawctl`:
 - Prefer the active claw when the user does not specify a target.
 - Use `clawctl versions <implementation>` before assuming a version exists upstream.
 - Use `clawctl doctor` before guessing why an install or runtime path is broken.
-- Treat `docker` as not implemented today.
-- Treat `nanoclaw`, `bitclaw`, and `ironclaw` as install-only.
-- Treat `piclaw` as Docker-first metadata only.
-- Prefer `hermes` over the install-only Tier 3 entries when the user needs a bootstrap-backed interactable claw.
+- Honor `CLAW_RUNTIME` or `--runtime` when choosing between local and Docker installs.
+- Prefer `hermes` when the user needs a bootstrap-backed interactable claw.
 - Do not claim Telegram transport is working through `clawctl` yet.
 - Do say that shared Telegram config is rendered or exported into adapters that support it.
-- `stop` is real for the current managed local backend.
+- `stop` is real for the current managed backend.
 
 If the task is about implementation details or behavior, inspect the live CLI package:
 
@@ -238,6 +221,7 @@ clawctl doctor [<implementation>]
 clawctl status [<implementation>]
 clawctl ping [<implementation>]
 clawctl chat <message> [<implementation>]
+clawctl stop [<implementation>]
 clawctl cleanup [<implementation>]
 clawctl uninstall [--all] <implementation>[@version]
 clawctl config get <key>

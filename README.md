@@ -1,6 +1,6 @@
 # clawctl
 
-`clawctl` is a local runtime manager for claws.
+`clawctl` is a runtime manager for claws.
 
 It installs versioned claw implementations into a private shared root, keeps one active claw selection, renders isolated runtime config from shared credentials, and manages a local background runtime for supported claws.
 
@@ -12,7 +12,7 @@ Implemented today:
 
 - Bun + Effect CLI in [`packages/cli`](packages/cli)
 - shared root under `~/.clawctl` by default, with env overrides
-- local backend execution plus Docker metadata/validation only
+- backend-aware install and runtime plumbing for both `local` and `docker`
 - shared config plus isolated per-runtime state
 - active shims under `~/.clawctl/bin/`
 - install, list, versions, use, current, doctor, cleanup, init, status, ping, chat, stop, uninstall, and config flows
@@ -20,35 +20,20 @@ Implemented today:
 Current limits:
 
 - supported host platform: `darwin-arm64`
-- `docker` is modeled but not implemented yet
-- `nanoclaw`, `bitclaw`, and `ironclaw` are still install-only in `clawctl`
-- `piclaw` remains Docker-first metadata only
+- `source-build` is still modeled but not implemented
 
 ## Supported Claws
 
 Fully supported:
 
-- Tier 1: `nullclaw`, `picoclaw`, `zeroclaw`
-- Tier 2: `openclaw`, `nanobot`
+- Tier 1: `nullclaw`, `picoclaw`, `zeroclaw` with local and Docker backends
+- Tier 2: `openclaw`, `nanobot` with local and Docker backends
 
 Registered with limits:
 
 - `hermes`
-  - bootstrap-backed local adapter
+  - bootstrap-backed adapter with local and Docker backends
   - supports managed `use`, `status`, `stop`, `chat`, and `ping`
-- `nanoclaw`
-  - bootstrap-backed local install target
-  - installable, but not activatable or interactable through `clawctl`
-- `bitclaw`
-  - bootstrap-backed local install target
-  - installable, but not activatable or interactable through `clawctl`
-- `ironclaw`
-  - release-backed install metadata works
-  - installable, but not activatable through the current managed runtime flow
-- `piclaw`
-  - Docker-first metadata only
-  - `versions` and `doctor` work
-  - Docker execution is not implemented
 
 ## Monorepo Layout
 

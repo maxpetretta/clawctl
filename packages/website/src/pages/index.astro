@@ -1,9 +1,9 @@
 ---
 import "@/styles/global.css"
 
-const title = "clawctl | Local runtime manager for claws"
+const title = "clawctl | Runtime manager for claws"
 const description =
-  "Install versioned claws under one root, switch the active claw, share credentials, and run managed local claw runtimes."
+  "Install versioned claws under one root, switch the active claw, share credentials, and run managed claw runtimes."
 
 const facts = [
   {
@@ -12,11 +12,11 @@ const facts = [
   },
   {
     title: "What works today",
-    copy: "The current implementation supports a local backend on darwin-arm64, with managed local runtimes for supported chat-capable claws plus install, use, status, doctor, cleanup, and uninstall flows.",
+    copy: "The current implementation supports local and Docker backends on darwin-arm64, with managed runtimes for the registered claws plus install, use, status, doctor, cleanup, and uninstall flows.",
   },
   {
     title: "What is not live yet",
-    copy: "Docker is modeled but not implemented. nanoclaw still lacks a local message transport, and piclaw/ironclaw are not fully activatable yet.",
+    copy: "Source-build installers and broader platform support are still modeled work, not finished behavior.",
   },
 ]
 
@@ -33,8 +33,8 @@ const supportedClaws = [
   },
   {
     title: "Tier 3",
-    items: ["nanoclaw", "bitclaw", "ironclaw", "piclaw"],
-    copy: "Registered with limits. nanoclaw supports lifecycle control only. bitclaw also supports chat and ping through host-side IPC. ironclaw is install-only. piclaw is Docker-first metadata only.",
+    items: ["hermes"],
+    copy: "Bootstrap-backed local adapter with managed install, use, status, stop, chat, and ping support.",
   },
 ]
 
@@ -77,10 +77,10 @@ const packages = [
   <body>
     <main class="shell">
       <section class="hero">
-        <p class="eyebrow">local claw runtime management</p>
+        <p class="eyebrow">claw runtime management</p>
         <h1>Install claws. Switch versions. Keep one active runtime.</h1>
         <p class="lede">
-          <code>clawctl</code> is a local runtime manager for claws. It installs versioned claws under one private
+          <code>clawctl</code> is a runtime manager for claws. It installs versioned claws under one private
           root, keeps one active claw selection, and renders isolated runtime config from shared credentials.
         </p>
 
@@ -121,7 +121,7 @@ const packages = [
             </li>
             <li>
               <strong>Backend</strong>
-              <span>local only</span>
+              <span>local and docker</span>
             </li>
             <li>
               <strong>Runtime shape</strong>
@@ -181,7 +181,7 @@ const packages = [
           <ul>
             <li>
               <strong>Docker</strong>
-              <span>Parsed by the CLI, but not implemented yet.</span>
+              <span>Supported for the registered claws through the container supervisor backend.</span>
             </li>
             <li>
               <strong>Telegram</strong>
@@ -189,7 +189,7 @@ const packages = [
             </li>
             <li>
               <strong>Tier 3</strong>
-              <span>Do not assume activatable means messageable; nanoclaw still lacks a local message transport.</span>
+              <span>Tier 3 currently consists of hermes only.</span>
             </li>
             <li>
               <strong>Isolation</strong>

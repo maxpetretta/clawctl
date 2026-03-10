@@ -1,18 +1,18 @@
 # `@clawctl/cli`
 
-`clawctl` is a local runtime manager for supported claw implementations.
+`clawctl` is a runtime manager for supported claw implementations.
 
-It installs versioned claws into a private root, keeps one active selection, renders isolated runtime config from shared credentials, starts a managed local runtime for supported claws, and passes `chat`, `ping`, and `status` calls through that runtime.
+It installs versioned claws into a private root, keeps one active selection, renders isolated runtime config from shared credentials, starts a managed runtime for supported claws, and passes `chat`, `ping`, and `status` calls through that runtime.
 
 ## Current Scope
 
 Current implementation status:
 
 - host platform: `darwin-arm64`
-- runtime backend: `local`
+- runtime backends: `local` and `docker`
 - command runtime: Bun + Effect
 - install root: `~/.clawctl` by default
-- root help is custom-rendered for a compact command overview
+- root and subcommand help are custom-rendered from shared metadata in a Docker-style layout
 
 Supported today:
 
@@ -21,11 +21,8 @@ Supported today:
 
 Registered but limited:
 
-- Tier 3: `hermes`, `nanoclaw`, `bitclaw`, `ironclaw`, `piclaw`
+- Tier 3: `hermes`
 - `hermes` supports managed `install`, `use`, `status`, `stop`, `chat`, and `ping`
-- `nanoclaw` and `bitclaw` are installable bootstrap targets, but still install-only in `clawctl`
-- `ironclaw` is installable but not activatable through the current managed runtime flow
-- `piclaw` is Docker-first metadata only; Docker execution is not implemented yet
 
 ## Run The CLI
 
@@ -35,7 +32,7 @@ From the repo root:
 bun run cli --help
 ```
 
-Show the compact root help directly:
+Show the grouped root help directly:
 
 ```bash
 bun run cli
@@ -130,7 +127,7 @@ clawctl install picoclaw@v0.2.0
 
 Notes:
 
-- installs are isolated under `~/.clawctl/installs/local/<implementation>/<version>/`
+- installs are isolated under `~/.clawctl/installs/<backend>/<implementation>/<version>/`
 - `openclaw` is installed into a private npm prefix managed by `clawctl`, not your global npm install
 - `nanobot` is installed into a private `uv tool` directory managed by `clawctl`
 
@@ -184,7 +181,7 @@ clawctl ping
 Notes:
 
 - `chat` and `ping` auto-activate the selected target before execution
-- supported claws run behind a clawctl-managed local background runtime under `~/.clawctl/runtimes/local/...`
+- supported claws run behind a clawctl-managed runtime under `~/.clawctl/runtimes/<backend>/...`
 - unsupported claws fail clearly instead of pretending to support chat
 
 ### 6. Initialize PATH Setup
@@ -202,15 +199,13 @@ clawctl init zsh
 clawctl init fish
 ```
 
-### 7. Check Health And State
+### 7. Check Health And Runtime State
 
 Run environment and install diagnostics:
 
 ```bash
 clawctl doctor
 clawctl doctor openclaw
-clawctl stop
-clawctl stop openclaw
 ```
 
 Show install and adapter status:
@@ -218,6 +213,13 @@ Show install and adapter status:
 ```bash
 clawctl status
 clawctl status openclaw
+```
+
+Stop a managed runtime:
+
+```bash
+clawctl stop
+clawctl stop openclaw
 ```
 
 ### 8. Remove Installs And Stale State
@@ -298,9 +300,7 @@ clawctl config set <key> <value>
 
 Current caveats:
 
-- `--runtime docker` is parsed but not implemented yet
-- `nanoclaw`, `bitclaw`, and `ironclaw` are still install-only
-- `piclaw` is metadata-only until Docker execution exists
+- `source-build` is modeled but not implemented yet
 - only `darwin-arm64` is supported right now
 
 If you need the implementation-aligned product spec, see [`../../SPEC.md`](../../SPEC.md).
