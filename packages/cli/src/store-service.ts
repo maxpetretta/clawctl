@@ -29,6 +29,7 @@ type ClawctlStoreApi = {
   readonly resolveInstalledRecord: (
     implementation: string,
     version?: string,
+    backend?: string,
   ) => Effect.Effect<InstallRecord, ClawctlError>
   readonly readCurrentSelection: Effect.Effect<CurrentSelection | undefined, ClawctlSystemError>
   readonly writeCurrentSelection: (selection: CurrentSelection) => Effect.Effect<void, ClawctlSystemError>
@@ -121,29 +122,38 @@ export const ClawctlStoreLive = Layer.effect(
       "store.listInstallRecords",
       Effect.gen(function* () {
         yield* ensureClawctlDirectories(fs, paths, "store.make", ["root", "install"])
-        const localRoot = `${paths.installDir}/local`
-        const localExists = yield* fs.exists(localRoot)
-        if (!localExists) {
+        const installRootExists = yield* fs.exists(paths.installDir)
+        if (!installRootExists) {
           return [] as InstallRecord[]
         }
-        const implementations = (yield* fs.readDirectory(localRoot)).sort((left, right) => left.localeCompare(right))
         const records: InstallRecord[] = []
+        const backends = (yield* fs.readDirectory(paths.installDir)).sort((left, right) => left.localeCompare(right))
 
-        for (const implementation of implementations) {
-          const versionDir = installParentDir(implementation, "local")
-          const versionExists = yield* fs.exists(versionDir)
-          if (!versionExists) {
+        for (const backend of backends) {
+          const backendRoot = `${paths.installDir}/${backend}`
+          const backendExists = yield* fs.exists(backendRoot)
+          if (!backendExists) {
             continue
           }
-          const versions = yield* fs.readDirectory(versionDir)
-          for (const version of versions) {
-            const metadataFile = installMetadataFile(implementation, version, "local")
-            const exists = yield* fs.exists(metadataFile)
-            if (!exists) {
+          const implementations = (yield* fs.readDirectory(backendRoot)).sort((left, right) =>
+            left.localeCompare(right),
+          )
+          for (const implementation of implementations) {
+            const versionDir = installParentDir(implementation, backend)
+            const versionExists = yield* fs.exists(versionDir)
+            if (!versionExists) {
               continue
             }
-            const source = yield* fs.readFileString(metadataFile)
-            records.push(parseInstallRecordJson(source) as InstallRecord)
+            const versions = yield* fs.readDirectory(versionDir)
+            for (const version of versions) {
+              const metadataFile = installMetadataFile(implementation, version, backend)
+              const exists = yield* fs.exists(metadataFile)
+              if (!exists) {
+                continue
+              }
+              const source = yield* fs.readFileString(metadataFile)
+              records.push(parseInstallRecordJson(source) as InstallRecord)
+            }
           }
         }
 
@@ -158,15 +168,35 @@ export const ClawctlStoreLive = Layer.effect(
     const resolveInstalledRecord = Effect.fn("ClawctlStoreService.resolveInstalledRecord")(function* (
       implementation: string,
       version?: string,
+      backend?: string,
     ) {
-      const records = (yield* listInstallRecords).filter((record) => record.implementation === implementation)
+      const records = (yield* listInstallRecords).filter(
+        (record) => record.implementation === implementation && (backend === undefined || record.backend === backend),
+      )
       if (records.length === 0) {
-        return yield* userError("store.resolveInstalledRecord", `implementation is not installed: ${implementation}`)
+        const backendSuffix = backend ? ` for ${backend}` : ""
+        return yield* userError(
+          "store.resolveInstalledRecord",
+          `implementation is not installed${backendSuffix}: ${implementation}`,
+        )
       }
       if (version) {
-        const match = records.find(
+        const matches = records.filter(
           (record) => record.resolvedVersion === version || record.requestedVersion === version,
         )
+        if (matches.length === 0) {
+          return yield* userError(
+            "store.resolveInstalledRecord",
+            `version is not installed: ${implementation}@${version}`,
+          )
+        }
+        if (matches.length > 1 && backend === undefined) {
+          return yield* userError(
+            "store.resolveInstalledRecord",
+            `version is installed for multiple backends: ${implementation}@${version}`,
+          )
+        }
+        const [match] = matches
         if (!match) {
           return yield* userError(
             "store.resolveInstalledRecord",
@@ -174,6 +204,14 @@ export const ClawctlStoreLive = Layer.effect(
           )
         }
         return match
+      }
+
+      const distinctBackends = [...new Set(records.map((record) => record.backend))]
+      if (distinctBackends.length > 1 && backend === undefined) {
+        return yield* userError(
+          "store.resolveInstalledRecord",
+          `multiple backends are installed for ${implementation}; specify a runtime backend`,
+        )
       }
       const [latest] = [...records].sort((left, right) => compareVersions(right.resolvedVersion, left.resolvedVersion))
       if (!latest) {

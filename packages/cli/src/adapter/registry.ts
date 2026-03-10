@@ -16,8 +16,10 @@ import type { RegisteredImplementation } from "./types.ts"
 
 type ImplementationHook = {
   buildChatCommand: (input: {
+    backend: "local" | "docker"
     binaryPath: string
     config: Record<string, string>
+    entrypointCommand: ReadonlyArray<string>
     installRoot: string
     homeDir: string
     message: string
@@ -27,8 +29,10 @@ type ImplementationHook = {
     workspaceDir: string
   }) => string[]
   buildShimCommand?: (input: {
+    backend: "local" | "docker"
     binaryPath: string
     config: Record<string, string>
+    entrypointCommand: ReadonlyArray<string>
     installRoot: string
     homeDir: string
     port?: number
@@ -38,8 +42,10 @@ type ImplementationHook = {
     args: ReadonlyArray<string>
   }) => string[]
   chat?: (input: {
+    backend: "local" | "docker"
     binaryPath: string
     config: Record<string, string>
+    entrypointCommand: ReadonlyArray<string>
     installRoot: string
     homeDir: string
     message: string
@@ -57,8 +63,10 @@ type ImplementationHook = {
     entrypointCommand: string[]
   }>
   start?: (input: {
+    backend: "local" | "docker"
     binaryPath: string
     config: Record<string, string>
+    entrypointCommand: ReadonlyArray<string>
     installRoot: string
     homeDir: string
     record: {
@@ -76,8 +84,10 @@ type ImplementationHook = {
   }>
   resolveVersions?: () => Promise<ReadonlyArray<string>>
   status?: (input: {
+    backend: "local" | "docker"
     binaryPath: string
     config: Record<string, string>
+    entrypointCommand: ReadonlyArray<string>
     installRoot: string
     homeDir: string
     port?: number
@@ -97,8 +107,10 @@ type ImplementationHook = {
   >
   normalizeChatOutput?: (input: { stdout: string; stderr: string }) => string
   runtimeEnv: (input: {
+    backend: "local" | "docker"
     config: Record<string, string>
     homeDir: string
+    entrypointCommand: ReadonlyArray<string>
     installRoot: string
     port?: number
     runtimeDir: string
@@ -131,6 +143,7 @@ type StatusInput = Parameters<NonNullable<ImplementationHook["status"]>>[0]
 
 const currentDir = dirname(fileURLToPath(import.meta.url))
 const packageDir = resolve(currentDir, "../..")
+const dockerContextDir = resolve(packageDir, "docker")
 const templateDir = resolve(packageDir, "templates")
 
 const sharedKeys = ["CLAW_API_KEY", "CLAW_BASE_URL", "CLAW_MODEL"] as const satisfies readonly SharedConfigKey[]
@@ -154,6 +167,18 @@ function makeNativeDaemonRuntime(): RuntimeManifest {
     workspaceStrategy: "per-runtime",
     entrypoint: { kind: "adapter-hook", hook: "start" },
     health: { kind: "adapter-hook", hook: "status" },
+    chat: { kind: "adapter-hook", hook: "chat" },
+    ping: { kind: "prompt", text: "Reply with exactly the single word pong." },
+  }
+}
+
+function makeManagedContainerRuntime(): RuntimeManifest {
+  return {
+    supervision: { kind: "proxy" },
+    homeStrategy: "isolated-home",
+    workspaceStrategy: "per-runtime",
+    entrypoint: { kind: "adapter-hook", hook: "start" },
+    health: { kind: "process" },
     chat: { kind: "adapter-hook", hook: "chat" },
     ping: { kind: "prompt", text: "Reply with exactly the single word pong." },
   }
@@ -392,47 +417,13 @@ function makeReleaseBackend(input: BackendManifest["install"][number], runtime: 
   }
 }
 
-function makeUnmanagedRuntime(): RuntimeManifest {
+function makeDockerBackend(input: BackendManifest["install"][number], runtime: RuntimeManifest): BackendManifest {
   return {
-    supervision: { kind: "unmanaged" },
-    homeStrategy: "isolated-home",
-    workspaceStrategy: "per-runtime",
-    entrypoint: { kind: "exec", command: [] },
-    health: { kind: "none" },
-    chat: { kind: "argv", command: [] },
-    ping: { kind: "prompt", text: "" },
+    kind: "docker",
+    supported: true,
+    install: [input],
+    runtime,
   }
-}
-
-function makeInstallOnlyHooks() {
-  return {
-    hooks: {
-      buildChatCommand: true,
-      resolveVersions: true,
-      renderConfig: true,
-      runtimeEnv: true,
-    },
-    implementationHooks: {
-      buildChatCommand: () => [],
-      resolveVersions: async () => ["main"],
-      renderConfig: async () => [],
-      runtimeEnv: () => ({}),
-    },
-  } satisfies Pick<AdapterRegistration, "hooks" | "implementationHooks">
-}
-
-function makeBootstrapInstallOnlyHooks(install: NonNullable<ImplementationHook["install"]>) {
-  const installOnly = makeInstallOnlyHooks()
-  return {
-    hooks: {
-      ...installOnly.hooks,
-      install: true,
-    },
-    implementationHooks: {
-      ...installOnly.implementationHooks,
-      install,
-    },
-  } satisfies Pick<AdapterRegistration, "hooks" | "implementationHooks">
 }
 
 export function isInstallOnlyRegistration(registration: RegisteredImplementation): boolean {
@@ -482,64 +473,20 @@ function hermesRuntimeEnv(input: { homeDir: string; installRoot: string; workspa
   }
 }
 
-function makeReleaseInstallOnlyRegistration(input: {
-  assetPattern: string
-  assetArchive: Exclude<
-    BackendManifest["install"][number],
-    { strategy: "npm-package" | "python-package" | "repo-bootstrap" | "docker-build" | "source-build" }
-  >["assetRules"][number]["archive"]
-  description: string
-  displayName: string
-  docsUrl: string
-  id: string
-  repository: string
-  versionSourceRepository?: string
-}) {
+function hermesDockerRuntimeEnv(input: { homeDir: string; workspaceDir: string }): NodeJS.ProcessEnv {
   return {
-    manifest: {
-      id: input.id,
-      displayName: input.displayName,
-      supportTier: "tier3",
-      description: input.description,
-      repository: `https://github.com/${input.repository}`,
-      docsUrl: input.docsUrl,
-      capabilities: makeCapabilities({
-        chat: false,
-        ping: false,
-        telegram: true,
-        daemon: true,
-      }),
-      config: makeConfig([], []),
-      backends: [
-        {
-          kind: "local",
-          supported: true,
-          install: [
-            {
-              strategy: "github-release",
-              priority: 1,
-              repository: input.repository,
-              versionSource: {
-                kind: "github-releases",
-                repository: input.versionSourceRepository ?? input.repository,
-              },
-              supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
-              assetRules: [
-                {
-                  match: { os: "darwin", arch: "arm64" },
-                  pattern: input.assetPattern,
-                  archive: input.assetArchive,
-                },
-              ],
-              verification: { kind: "none" },
-            },
-          ],
-          runtime: makeUnmanagedRuntime(),
-        },
-      ],
-    } satisfies ImplementationManifest,
-    ...makeInstallOnlyHooks(),
-  } satisfies AdapterRegistration
+    HOME: input.homeDir,
+    HERMES_HOME: input.homeDir,
+    TERMINAL_CWD: input.workspaceDir,
+    MSWEA_GLOBAL_CONFIG_DIR: input.homeDir,
+    MSWEA_SILENT_STARTUP: "1",
+    HERMES_QUIET: "1",
+    NO_COLOR: "1",
+    CI: "1",
+    PATH: ["/opt/hermes/venv/bin", "/opt/hermes/repo/node_modules/.bin", process.env.PATH ?? ""]
+      .filter((entry) => entry.length > 0)
+      .join(":"),
+  }
 }
 
 const nullclawRegistration = {
@@ -551,6 +498,7 @@ const nullclawRegistration = {
     repository: "https://github.com/nullclaw/nullclaw",
     docsUrl: "https://github.com/nullclaw/nullclaw",
     capabilities: makeCapabilities({
+      docker: true,
       telegram: true,
     }),
     config: makeConfig([
@@ -579,6 +527,18 @@ const nullclawRegistration = {
           verification: { kind: "none" },
         },
         makeNativeDaemonRuntime(),
+      ),
+      makeDockerBackend(
+        {
+          strategy: "docker-build",
+          priority: 2,
+          context: resolve(dockerContextDir, "nullclaw"),
+          image: "clawctl/nullclaw",
+          entrypointCommand: ["nullclaw"],
+          versionSource: { kind: "github-releases", repository: "nullclaw/nullclaw" },
+          supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
+        },
+        makeManagedContainerRuntime(),
       ),
     ],
   } satisfies ImplementationManifest,
@@ -624,6 +584,7 @@ const picoclawRegistration = {
     repository: "https://github.com/sipeed/picoclaw",
     docsUrl: "https://github.com/sipeed/picoclaw",
     capabilities: makeCapabilities({
+      docker: true,
       telegram: true,
     }),
     config: makeConfig([
@@ -652,6 +613,18 @@ const picoclawRegistration = {
           verification: { kind: "checksum-file", assetPattern: "picoclaw_0.2.0_checksums.txt" },
         },
         makeNativeDaemonRuntime(),
+      ),
+      makeDockerBackend(
+        {
+          strategy: "docker-build",
+          priority: 2,
+          context: resolve(dockerContextDir, "picoclaw"),
+          image: "clawctl/picoclaw",
+          entrypointCommand: ["picoclaw"],
+          versionSource: { kind: "github-releases", repository: "sipeed/picoclaw" },
+          supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
+        },
+        makeManagedContainerRuntime(),
       ),
     ],
   } satisfies ImplementationManifest,
@@ -706,6 +679,7 @@ const zeroclawRegistration = {
     repository: "https://github.com/zeroclaw-labs/zeroclaw",
     docsUrl: "https://github.com/zeroclaw-labs/zeroclaw",
     capabilities: makeCapabilities({
+      docker: true,
       telegram: true,
     }),
     config: makeConfig([
@@ -734,6 +708,18 @@ const zeroclawRegistration = {
           verification: { kind: "checksum-file", assetPattern: "SHA256SUMS" },
         },
         makeNativeDaemonRuntime(),
+      ),
+      makeDockerBackend(
+        {
+          strategy: "docker-build",
+          priority: 2,
+          context: resolve(dockerContextDir, "zeroclaw"),
+          image: "clawctl/zeroclaw",
+          entrypointCommand: ["zeroclaw"],
+          versionSource: { kind: "github-releases", repository: "zeroclaw-labs/zeroclaw" },
+          supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
+        },
+        makeManagedContainerRuntime(),
       ),
     ],
   } satisfies ImplementationManifest,
@@ -779,6 +765,7 @@ const openclawRegistration = {
     repository: "https://github.com/openclaw/openclaw",
     docsUrl: "https://github.com/openclaw/openclaw",
     capabilities: makeCapabilities({
+      docker: true,
       telegram: true,
     }),
     config: makeConfig([
@@ -804,6 +791,22 @@ const openclawRegistration = {
           },
         ],
         runtime: makeNativeDaemonRuntime(),
+      },
+      {
+        kind: "docker",
+        supported: true,
+        install: [
+          {
+            strategy: "docker-build",
+            priority: 2,
+            context: resolve(dockerContextDir, "openclaw"),
+            image: "clawctl/openclaw",
+            entrypointCommand: ["openclaw"],
+            versionSource: { kind: "npm", packageName: "openclaw" },
+            supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
+          },
+        ],
+        runtime: makeManagedContainerRuntime(),
       },
     ],
   } satisfies ImplementationManifest,
@@ -907,7 +910,9 @@ const nanobotRegistration = {
     description: "Package-managed local adapter with native daemon supervision",
     repository: "https://github.com/nanobot-ai/nanobot",
     docsUrl: "https://github.com/nanobot-ai/nanobot",
-    capabilities: makeCapabilities(),
+    capabilities: makeCapabilities({
+      docker: true,
+    }),
     config: makeConfig([
       {
         path: ".nanobot/config.json",
@@ -932,6 +937,22 @@ const nanobotRegistration = {
           },
         ],
         runtime: makeNativeDaemonRuntime(),
+      },
+      {
+        kind: "docker",
+        supported: true,
+        install: [
+          {
+            strategy: "docker-build",
+            priority: 2,
+            context: resolve(dockerContextDir, "nanobot"),
+            image: "clawctl/nanobot",
+            entrypointCommand: ["nanobot"],
+            versionSource: { kind: "pypi", packageName: "nanobot-ai" },
+            supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
+          },
+        ],
+        runtime: makeManagedContainerRuntime(),
       },
     ],
   } satisfies ImplementationManifest,
@@ -997,6 +1018,7 @@ const hermesRegistration = {
     repository: "https://github.com/NousResearch/hermes-agent",
     docsUrl: "https://hermes-agent.nousresearch.com/docs/",
     capabilities: makeCapabilities({
+      docker: true,
       telegram: true,
     }),
     config: makeConfig([
@@ -1024,6 +1046,22 @@ const hermesRegistration = {
         ],
         runtime: makeNativeDaemonRuntime(),
       },
+      {
+        kind: "docker",
+        supported: true,
+        install: [
+          {
+            strategy: "docker-build",
+            priority: 2,
+            context: resolve(dockerContextDir, "hermes"),
+            image: "clawctl/hermes",
+            entrypointCommand: ["/usr/local/bin/hermes"],
+            versionSource: { kind: "adapter-hook", hook: "resolveVersions" },
+            supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
+          },
+        ],
+        runtime: makeManagedContainerRuntime(),
+      },
     ],
   } satisfies ImplementationManifest,
   hooks: {
@@ -1036,11 +1074,10 @@ const hermesRegistration = {
     runtimeEnv: true,
   },
   implementationHooks: {
-    buildChatCommand: ({ binaryPath, installRoot, message }) => [
-      binaryPath,
-      resolve(installRoot, "clawctl-hermes-chat.py"),
-      message,
-    ],
+    buildChatCommand: ({ backend, binaryPath, installRoot, message }) =>
+      backend === "docker"
+        ? ["/opt/hermes/venv/bin/python", "/opt/hermes/clawctl-hermes-chat.py", message]
+        : [binaryPath, resolve(installRoot, "clawctl-hermes-chat.py"), message],
     install: async ({ installRoot }) => {
       const repoDir = resolve(installRoot, "repo")
       const git = gitExecutable()
@@ -1132,206 +1169,54 @@ if __name__ == "__main__":
         content: hermesEnvFile(config, workspaceDir),
       },
     ],
-    runtimeEnv: ({ homeDir, installRoot, workspaceDir }) =>
-      hermesRuntimeEnv({
-        homeDir,
-        installRoot,
-        workspaceDir,
-      }),
-    start: ({ binaryPath, homeDir, installRoot, workspaceDir }) =>
+    runtimeEnv: ({ backend, homeDir, installRoot, workspaceDir }) =>
+      backend === "docker"
+        ? hermesDockerRuntimeEnv({
+            homeDir,
+            workspaceDir,
+          })
+        : hermesRuntimeEnv({
+            homeDir,
+            installRoot,
+            workspaceDir,
+          }),
+    start: ({ backend, binaryPath, homeDir, installRoot, workspaceDir }) =>
       resolvedStart({
         command: binaryPath,
-        args: ["-m", "hermes_cli.main", "gateway", "run", "--replace"],
-        env: hermesRuntimeEnv({
-          homeDir,
-          installRoot,
-          workspaceDir,
-        }),
+        args:
+          backend === "docker"
+            ? ["gateway", "run", "--replace"]
+            : ["-m", "hermes_cli.main", "gateway", "run", "--replace"],
+        env:
+          backend === "docker"
+            ? hermesDockerRuntimeEnv({
+                homeDir,
+                workspaceDir,
+              })
+            : hermesRuntimeEnv({
+                homeDir,
+                installRoot,
+                workspaceDir,
+              }),
       }),
-    status: makeBinaryStatusHook(({ binaryPath, homeDir, installRoot, workspaceDir }) => ({
-      command: [binaryPath, "-m", "hermes_cli.main", "gateway", "status"],
-      env: hermesRuntimeEnv({
-        homeDir,
-        installRoot,
-        workspaceDir,
-      }),
+    status: makeBinaryStatusHook(({ backend, binaryPath, homeDir, installRoot, workspaceDir }) => ({
+      command:
+        backend === "docker"
+          ? [binaryPath, "gateway", "status"]
+          : [binaryPath, "-m", "hermes_cli.main", "gateway", "status"],
+      env:
+        backend === "docker"
+          ? hermesDockerRuntimeEnv({
+              homeDir,
+              workspaceDir,
+            })
+          : hermesRuntimeEnv({
+              homeDir,
+              installRoot,
+              workspaceDir,
+            }),
     })),
   },
-} satisfies AdapterRegistration
-
-const nanoclawRegistration = {
-  manifest: {
-    id: "nanoclaw",
-    displayName: "NanoClaw",
-    supportTier: "tier3",
-    description: "Bootstrap-heavy local install target",
-    repository: "https://github.com/qwibitai/nanoclaw",
-    docsUrl: "https://github.com/qwibitai/nanoclaw",
-    capabilities: makeCapabilities({
-      chat: false,
-      ping: false,
-      telegram: true,
-      daemon: true,
-    }),
-    config: makeConfig([], []),
-    backends: [
-      {
-        kind: "local",
-        supported: true,
-        install: [
-          {
-            strategy: "repo-bootstrap",
-            priority: 1,
-            repository: "https://github.com/qwibitai/nanoclaw.git",
-            refPolicy: "branch",
-            bootstrapHook: "install",
-            versionSource: { kind: "adapter-hook", hook: "resolveVersions" },
-            supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
-          },
-        ],
-        runtime: makeUnmanagedRuntime(),
-      },
-    ],
-  } satisfies ImplementationManifest,
-  ...makeBootstrapInstallOnlyHooks(async ({ installRoot }) => {
-    const repoDir = resolve(installRoot, "repo")
-    await runInheritedCommand([npmExecutable(), "ci"], {
-      cwd: repoDir,
-      failureMessage: "nanoclaw bootstrap failed during npm ci",
-    })
-    await runInheritedCommand([npmExecutable(), "run", "build"], {
-      cwd: repoDir,
-      failureMessage: "nanoclaw bootstrap failed during npm run build",
-    })
-    return {
-      entrypointCommand: ["node", resolve(repoDir, "dist", "index.js")],
-    }
-  }),
-} satisfies AdapterRegistration
-
-const bitclawRegistration = {
-  manifest: {
-    id: "bitclaw",
-    displayName: "BitClaw",
-    supportTier: "tier3",
-    description: "Bootstrap-heavy local install target",
-    repository: "https://github.com/NickTikhonov/bitclaw",
-    docsUrl: "https://github.com/NickTikhonov/bitclaw",
-    capabilities: makeCapabilities({
-      chat: false,
-      ping: false,
-      telegram: true,
-      daemon: true,
-    }),
-    config: makeConfig([], []),
-    backends: [
-      {
-        kind: "local",
-        supported: true,
-        install: [
-          {
-            strategy: "repo-bootstrap",
-            priority: 1,
-            repository: "https://github.com/NickTikhonov/bitclaw.git",
-            refPolicy: "branch",
-            bootstrapHook: "install",
-            versionSource: { kind: "adapter-hook", hook: "resolveVersions" },
-            supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
-          },
-        ],
-        runtime: makeUnmanagedRuntime(),
-      },
-    ],
-  } satisfies ImplementationManifest,
-  ...makeBootstrapInstallOnlyHooks(async ({ installRoot }) => {
-    const repoDir = resolve(installRoot, "repo")
-    await runInheritedCommand([npmExecutable(), "ci"], {
-      cwd: repoDir,
-      failureMessage: "bitclaw bootstrap failed during npm ci",
-    })
-    await Bun.write(
-      resolve(repoDir, "clawctl-daemon.ts"),
-      `import { dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-import { startContainer, stopContainer } from "./src/runtime.ts";
-
-const projectRoot = dirname(fileURLToPath(import.meta.url));
-startContainer(projectRoot);
-
-const shutdown = () => {
-  try {
-    stopContainer();
-  } finally {
-    process.exit(0);
-  }
-};
-
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
-setInterval(() => {}, 1000);
-`,
-    )
-    return {
-      entrypointCommand: [
-        "node",
-        resolve(repoDir, "node_modules", "tsx", "dist", "cli.mjs"),
-        resolve(repoDir, "clawctl-daemon.ts"),
-      ],
-    }
-  }),
-} satisfies AdapterRegistration
-
-const ironclawRegistration = makeReleaseInstallOnlyRegistration({
-  id: "ironclaw",
-  displayName: "IronClaw",
-  description: "Experimental PostgreSQL-backed Rust agent platform",
-  repository: "nearai/ironclaw",
-  docsUrl: "https://github.com/nearai/ironclaw",
-  assetPattern: "ironclaw-aarch64-apple-darwin.tar.gz",
-  assetArchive: { kind: "tar.gz", binaryPath: "ironclaw-aarch64-apple-darwin/ironclaw" },
-})
-
-const piclawRegistration = {
-  manifest: {
-    id: "piclaw",
-    displayName: "Piclaw",
-    supportTier: "tier3",
-    description: "Docker-first web orchestrator",
-    repository: "https://github.com/rcarmo/piclaw",
-    docsUrl: "https://github.com/rcarmo/piclaw",
-    capabilities: makeCapabilities({
-      chat: false,
-      ping: false,
-      status: true,
-      local: false,
-      docker: true,
-    }),
-    config: makeConfig([], []),
-    backends: [
-      {
-        kind: "local",
-        supported: false,
-        install: [],
-        runtime: makeUnmanagedRuntime(),
-      },
-      {
-        kind: "docker",
-        supported: true,
-        install: [
-          {
-            strategy: "docker-build",
-            priority: 1,
-            context: "https://github.com/rcarmo/piclaw.git",
-            image: "piclaw",
-            versionSource: { kind: "git-tags", repository: "https://github.com/rcarmo/piclaw.git" },
-            supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
-          },
-        ],
-        runtime: makeUnmanagedRuntime(),
-      },
-    ],
-  } satisfies ImplementationManifest,
-  ...makeInstallOnlyHooks(),
 } satisfies AdapterRegistration
 
 export const adapterRegistrations = [
@@ -1341,10 +1226,6 @@ export const adapterRegistrations = [
   openclawRegistration,
   nanobotRegistration,
   hermesRegistration,
-  nanoclawRegistration,
-  bitclawRegistration,
-  ironclawRegistration,
-  piclawRegistration,
 ] as const
 
 export function listRegisteredImplementations(): RegisteredImplementation[] {

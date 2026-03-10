@@ -5,6 +5,7 @@ export const defaultSharedConfig = {
   CLAW_API_KEY: "replace-me",
   CLAW_BASE_URL: "https://openrouter.ai/api/v1",
   CLAW_MODEL: "moonshotai/kimi-k2.5",
+  CLAW_RUNTIME: "local",
   TELEGRAM_BOT_TOKEN: "",
   TELEGRAM_BOT_USERNAME: "",
   TELEGRAM_CHAT_ID: "",
@@ -17,6 +18,7 @@ export const sharedConfigSpec = Config.all({
   CLAW_API_KEY: Config.redacted("CLAW_API_KEY"),
   CLAW_BASE_URL: Config.string("CLAW_BASE_URL").pipe(Config.withDefault(defaultSharedConfig.CLAW_BASE_URL)),
   CLAW_MODEL: Config.string("CLAW_MODEL").pipe(Config.withDefault(defaultSharedConfig.CLAW_MODEL)),
+  CLAW_RUNTIME: Config.string("CLAW_RUNTIME").pipe(Config.withDefault(defaultSharedConfig.CLAW_RUNTIME)),
   TELEGRAM_BOT_TOKEN: Config.redacted("TELEGRAM_BOT_TOKEN").pipe(
     Config.withDefault(Redacted.make(defaultSharedConfig.TELEGRAM_BOT_TOKEN)),
   ),
@@ -71,6 +73,7 @@ export function sharedConfigToEntries(config: SharedConfig): SharedConfigEntries
     CLAW_API_KEY: Redacted.value(config.CLAW_API_KEY),
     CLAW_BASE_URL: config.CLAW_BASE_URL,
     CLAW_MODEL: config.CLAW_MODEL,
+    CLAW_RUNTIME: config.CLAW_RUNTIME,
     TELEGRAM_BOT_TOKEN: Redacted.value(config.TELEGRAM_BOT_TOKEN),
     TELEGRAM_BOT_USERNAME: config.TELEGRAM_BOT_USERNAME,
     TELEGRAM_CHAT_ID: config.TELEGRAM_CHAT_ID,

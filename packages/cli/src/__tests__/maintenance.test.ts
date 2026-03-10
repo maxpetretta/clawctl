@@ -34,8 +34,11 @@ function record(
     requestedVersion: input.requestedVersion ?? input.resolvedVersion,
     resolvedVersion: input.resolvedVersion,
     backend: input.backend ?? "local",
+    ...(input.containerImage === undefined ? {} : { containerImage: input.containerImage }),
     installStrategy: input.installStrategy ?? "npm-package",
-    installRoot: input.installRoot ?? join(root, "installs", "local", input.implementation, input.resolvedVersion),
+    installRoot:
+      input.installRoot ??
+      join(root, "installs", input.backend ?? "local", input.implementation, input.resolvedVersion),
     entrypointCommand: input.entrypointCommand ?? [],
     platform: input.platform ?? { os: "darwin", arch: "arm64" },
     sourceReference: input.sourceReference ?? "fixture",
@@ -101,6 +104,7 @@ describe("maintenance service", () => {
         context: ".",
         dockerfile: "Dockerfile",
         image: "clawctl:test",
+        entrypointCommand: ["claw"],
         supportedPlatforms: [{ os: "darwin", arch: "arm64" }],
         versionSource: { kind: "static", versions: ["latest"] },
       }),
@@ -122,6 +126,7 @@ describe("maintenance service", () => {
           CLAW_API_KEY: Redacted.make("replace-me"),
           CLAW_BASE_URL: "https://openrouter.ai/api/v1",
           CLAW_MODEL: "ok",
+          CLAW_RUNTIME: "local",
           TELEGRAM_BOT_TOKEN: Redacted.make(""),
           TELEGRAM_BOT_USERNAME: "",
           TELEGRAM_CHAT_ID: "",
@@ -162,69 +167,6 @@ describe("maintenance service", () => {
 
     expect(report.ok).toBe(true)
     expect(report.checks.some((check) => check.label === "openclaw:entrypoint:2026.3.7" && check.ok)).toBe(true)
-  })
-
-  test("doctor uses current selection and handles entrypoint-free installs", async () => {
-    const root = await createRoot()
-    process.env.CLAWCTL_GIT_BIN = "/usr/bin/git"
-    process.env.PATH = `${join(root, "bin")}:${originalPath}`
-
-    const report = await runWithLayer(
-      Effect.gen(function* () {
-        const paths = yield* ClawctlPathsService
-        const store = yield* ClawctlStoreService
-        const maintenance = yield* ClawctlMaintenanceService
-        yield* store.writeInstallRecord(
-          record(root, {
-            implementation: "nanoclaw",
-            resolvedVersion: "main",
-            installStrategy: "repo-bootstrap",
-            entrypointCommand: [],
-            supportTier: "tier3",
-          }),
-        )
-        yield* store.writeCurrentSelection({
-          implementation: "nanoclaw",
-          version: "main",
-          backend: "local",
-        })
-        yield* Effect.tryPromise({
-          try: async () => {
-            await mkdir(paths.paths.binDir, { recursive: true })
-            await writeExecutable(paths.activeShim())
-            await writeExecutable(paths.implementationShim("nanoclaw"))
-          },
-          catch: (cause) => userError("maintenance.test", String(cause)),
-        })
-        return yield* maintenance.runDoctor()
-      }),
-      makeMaintenanceLayer(root),
-    )
-
-    expect(report.ok).toBe(true)
-    expect(report.checks.some((check) => check.label === "path:bin" && check.ok)).toBe(true)
-    expect(report.checks.some((check) => check.label === "shim:claw" && check.ok)).toBe(true)
-    expect(
-      report.checks.some(
-        (check) => check.label === "nanoclaw:entrypoint:main" && check.detail === "no direct local entrypoint declared",
-      ),
-    ).toBe(true)
-  })
-
-  test("doctor reports missing shared config and tools", async () => {
-    const root = await createRoot()
-    process.env.CLAWCTL_DOCKER_BIN = join(root, "missing-docker")
-
-    const report = await runWithLayer(
-      Effect.gen(function* () {
-        const maintenance = yield* ClawctlMaintenanceService
-        return yield* maintenance.runDoctor("piclaw")
-      }),
-      makeMaintenanceLayer(root),
-    )
-
-    expect(report.ok).toBe(false)
-    expect(report.checks.some((check) => check.label.includes("piclaw:docker:tool") && !check.ok)).toBe(true)
   })
 
   test("cleanup clears stale current selections and stale directories", async () => {

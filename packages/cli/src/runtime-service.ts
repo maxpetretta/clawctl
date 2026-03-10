@@ -13,15 +13,17 @@ import type { RuntimeManifest } from "./adapter/schema.ts"
 import type { InstallRecord, RegisteredImplementation, RuntimeRecord } from "./adapter/types.ts"
 import { type ClawctlError, userError, withSystemError } from "./errors.ts"
 import { repairPythonScriptShebang } from "./installer-service.ts"
+import { isRuntimeBackend, type RuntimeBackend } from "./model.ts"
 import { ClawctlPathsLive, ClawctlPathsService } from "./paths-service.ts"
 import {
   makeParseReference,
   makeRequireInteractableImplementation,
   makeResolveRegistration,
 } from "./service-helpers.ts"
-import { missingSharedConfigKeys, sharedConfigToEntries } from "./shared-config.ts"
+import { missingSharedConfigKeys, sharedConfigToEntries, sharedConfigValue } from "./shared-config.ts"
 import { ClawctlStoreLive, ClawctlStoreService } from "./store-service.ts"
 import type { TargetReference } from "./target.ts"
+import { dockerExecutable } from "./tooling.ts"
 
 const daemonSentinel = "__daemon__"
 const shimSentinel = "__shim__"
@@ -56,7 +58,10 @@ type ClawctlRuntimeApi = {
   ) => Effect.Effect<number, ClawctlError>
   readonly pingText: () => string
   readonly runtimeState: (record: InstallRecord) => Effect.Effect<RuntimeSnapshot, ClawctlError>
-  readonly stopSelection: (target: Option.Option<string>) => Effect.Effect<StopSelectionResult, ClawctlError>
+  readonly stopSelection: (
+    target: Option.Option<string>,
+    backend?: RuntimeBackend,
+  ) => Effect.Effect<StopSelectionResult, ClawctlError>
 }
 
 export class ClawctlRuntimeService extends Context.Tag("@clawctl/cli/ClawctlRuntimeService")<
@@ -75,7 +80,11 @@ type DaemonServices = {
       version: string,
       backend?: string,
     ) => Effect.Effect<RuntimeRecord | undefined, ClawctlError>
-    resolveInstalledRecord: (implementation: string, version?: string) => Effect.Effect<InstallRecord, ClawctlError>
+    resolveInstalledRecord: (
+      implementation: string,
+      version?: string,
+      backend?: string,
+    ) => Effect.Effect<InstallRecord, ClawctlError>
     writeRuntimeRecord: (record: RuntimeRecord) => Effect.Effect<void, ClawctlError>
   }
 }
@@ -139,14 +148,6 @@ export function startupFailureMessage(
     logSource?: string
   },
 ): string {
-  if (implementation === "nanoclaw" && options?.logSource?.includes("No channels connected")) {
-    return "failed starting runtime for nanoclaw: stock nanoclaw has no channels configured; install a customized fork with a channel skill such as /add-telegram before using it through clawctl"
-  }
-  if (implementation === "nanoclaw" && options?.logSource?.includes("ERR_DLOPEN_FAILED")) {
-    return options?.excerpt
-      ? `failed starting runtime for nanoclaw: native module load failed; reinstall nanoclaw so its dependencies are rebuilt against your current Node.js version (try: clawctl uninstall --all nanoclaw && clawctl install nanoclaw)\n${options.excerpt}`
-      : "failed starting runtime for nanoclaw: native module load failed; reinstall nanoclaw so its dependencies are rebuilt against your current Node.js version (try: clawctl uninstall --all nanoclaw && clawctl install nanoclaw)"
-  }
   return options?.excerpt
     ? `failed starting runtime for ${implementation}: ${detail}\n${options.excerpt}`
     : `failed starting runtime for ${implementation}: ${detail}`
@@ -157,8 +158,10 @@ type ResolvedRuntime = {
     messagingUnavailableReason?: string
     implementationHooks: {
       buildChatCommand: (input: {
+        backend: "local" | "docker"
         binaryPath: string
         config: Record<string, string>
+        entrypointCommand: ReadonlyArray<string>
         installRoot: string
         homeDir: string
         message: string
@@ -168,8 +171,10 @@ type ResolvedRuntime = {
         workspaceDir: string
       }) => string[]
       buildShimCommand?: (input: {
+        backend: "local" | "docker"
         binaryPath: string
         config: Record<string, string>
+        entrypointCommand: ReadonlyArray<string>
         installRoot: string
         homeDir: string
         port?: number
@@ -179,8 +184,10 @@ type ResolvedRuntime = {
         args: ReadonlyArray<string>
       }) => string[]
       chat?: (input: {
+        backend: "local" | "docker"
         binaryPath: string
         config: Record<string, string>
+        entrypointCommand: ReadonlyArray<string>
         installRoot: string
         homeDir: string
         message: string
@@ -197,8 +204,10 @@ type ResolvedRuntime = {
         }>
       >
       runtimeEnv: (input: {
+        backend: "local" | "docker"
         config: Record<string, string>
         homeDir: string
+        entrypointCommand: ReadonlyArray<string>
         installRoot: string
         port?: number
         runtimeDir: string
@@ -206,8 +215,10 @@ type ResolvedRuntime = {
         workspaceDir: string
       }) => NodeJS.ProcessEnv
       start?: (input: {
+        backend: "local" | "docker"
         binaryPath: string
         config: Record<string, string>
+        entrypointCommand: ReadonlyArray<string>
         installRoot: string
         homeDir: string
         record: {
@@ -224,8 +235,10 @@ type ResolvedRuntime = {
         port?: number
       }>
       status?: (input: {
+        backend: "local" | "docker"
         binaryPath: string
         config: Record<string, string>
+        entrypointCommand: ReadonlyArray<string>
         installRoot: string
         homeDir: string
         port?: number
@@ -282,6 +295,41 @@ export const ClawctlRuntimeLive = Layer.effect(
     const resolveSharedConfigEntries = Effect.fn("ClawctlRuntimeService.resolveSharedConfigEntries")(function* () {
       return sharedConfigToEntries(yield* store.readSharedConfig)
     })
+    const resolveConfiguredRuntime = Effect.fn("ClawctlRuntimeService.resolveConfiguredRuntime")(function* () {
+      const configuredValue = sharedConfigValue(yield* store.readSharedConfig, "CLAW_RUNTIME")?.trim()
+      if (!configuredValue || configuredValue.length === 0) {
+        return "local" as const
+      }
+      if (!isRuntimeBackend(configuredValue)) {
+        return yield* userError(
+          "runtime.resolveConfiguredRuntime",
+          `shared config CLAW_RUNTIME must be one of: local, docker (got ${configuredValue})`,
+        )
+      }
+      return configuredValue
+    })
+    const runDockerStdout = Effect.fn("ClawctlRuntimeService.runDockerStdout")(function* (
+      action: string,
+      args: ReadonlyArray<string>,
+    ) {
+      return (yield* withSystemError(
+        action,
+        commandExecutor.string(Command.make(dockerExecutable(), ...args).pipe(Command.env(process.env))),
+      )).trim()
+    })
+    const runDockerExitCode = Effect.fn("ClawctlRuntimeService.runDockerExitCode")(function* (
+      action: string,
+      args: ReadonlyArray<string>,
+    ) {
+      return Number(
+        yield* withSystemError(
+          action,
+          commandExecutor.exitCode(Command.make(dockerExecutable(), ...args).pipe(Command.env(process.env))),
+        ),
+      )
+    })
+    const containerNameForRecord = (record: InstallRecord) =>
+      `clawctl-${record.implementation}-${record.backend}-${record.resolvedVersion.replaceAll(/[^A-Za-z0-9_.-]+/gu, "-")}`
     const clearShimAt = Effect.fn("ClawctlRuntimeService.clearShimAt")(function* (shimPath: string) {
       const exists = yield* withSystemError("runtime.shimExists", fs.exists(shimPath))
       if (!exists) {
@@ -364,10 +412,10 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
       const config = yield* store.readSharedConfig
       const configEntries = sharedConfigToEntries(config)
       const registration = yield* resolveRegistration(record.implementation)
-      const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion)
-      const homeDir = runtimeHomeDir(record.implementation, record.resolvedVersion)
-      const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion)
-      const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion)
+      const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion, record.backend)
+      const homeDir = runtimeHomeDir(record.implementation, record.resolvedVersion, record.backend)
+      const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion, record.backend)
+      const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion, record.backend)
 
       yield* withSystemError("runtime.makeHomeDir", fs.makeDirectory(homeDir, { recursive: true }))
       yield* withSystemError("runtime.makeWorkspaceDir", fs.makeDirectory(workspaceDir, { recursive: true }))
@@ -406,6 +454,18 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
       yield* withSystemError("runtime.makeRuntimeDir", fs.makeDirectory(runtimeDir, { recursive: true }))
     })
     const readRuntimeLogText = Effect.fn("ClawctlRuntimeService.readRuntimeLogText")(function* (record: InstallRecord) {
+      if (record.backend === "docker") {
+        const runtimeRecord = yield* store.readRuntimeRecord(
+          record.implementation,
+          record.resolvedVersion,
+          record.backend,
+        )
+        if (!runtimeRecord) {
+          return undefined
+        }
+        const logs = yield* readDockerLogs(record, runtimeRecord)
+        return logs.length > 0 ? logs : undefined
+      }
       const logFile = runtimeLogFile(record.implementation, record.resolvedVersion, record.backend)
       const exists = yield* withSystemError("runtime.logExists", fs.exists(logFile))
       if (!exists) {
@@ -441,16 +501,18 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
         )
       }
 
-      const homeDir = runtimeHomeDir(record.implementation, record.resolvedVersion)
-      const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion)
-      const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion)
-      const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion)
+      const homeDir = runtimeHomeDir(record.implementation, record.resolvedVersion, record.backend)
+      const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion, record.backend)
+      const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion, record.backend)
+      const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion, record.backend)
       const configEntries = yield* resolveSharedConfigEntries()
       return yield* Effect.tryPromise({
         try: () =>
           registration.implementationHooks.status?.({
+            backend: record.backend,
             binaryPath: record.entrypointCommand[0] ?? "",
             config: configEntries,
+            entrypointCommand: record.entrypointCommand,
             installRoot: record.installRoot,
             homeDir,
             record: {
@@ -470,15 +532,23 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
       target: Option.Option<string>,
     ) {
       const resolvedTarget = target._tag === "Some" ? target.value : undefined
+      const current = yield* store.readCurrentSelection
       if (resolvedTarget) {
         const parsed = yield* parseReference(resolvedTarget)
-        return yield* store.resolveInstalledRecord(parsed.implementation, parsed.version)
+        const backend =
+          current &&
+          current.implementation === parsed.implementation &&
+          (parsed.version === undefined || current.version === parsed.version)
+            ? current.backend
+            : yield* resolveConfiguredRuntime()
+        return yield* store
+          .resolveInstalledRecord(parsed.implementation, parsed.version, backend)
+          .pipe(Effect.catchAll(() => store.resolveInstalledRecord(parsed.implementation, parsed.version)))
       }
-      const current = yield* store.readCurrentSelection
       if (!current) {
         return yield* userError("runtime.resolveChatTarget", "no active claw selected")
       }
-      return yield* store.resolveInstalledRecord(current.implementation, current.version)
+      return yield* store.resolveInstalledRecord(current.implementation, current.version, current.backend)
     })
 
     const writeRuntimeState = Effect.fn("ClawctlRuntimeService.writeRuntimeState")(function* (
@@ -518,6 +588,120 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
         }
       }
     })
+    const buildDockerStartInvocation = Effect.fn("ClawctlRuntimeService.buildDockerStartInvocation")(function* (
+      record: InstallRecord,
+      resolved: ResolvedRuntime,
+    ) {
+      const configEntries = yield* resolveSharedConfigEntries()
+      const homeDir = runtimeHomeDir(record.implementation, record.resolvedVersion, record.backend)
+      const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion, record.backend)
+      const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion, record.backend)
+      const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion, record.backend)
+      const env = resolved.registration.implementationHooks.runtimeEnv({
+        backend: record.backend,
+        config: configEntries,
+        homeDir,
+        entrypointCommand: record.entrypointCommand,
+        installRoot: record.installRoot,
+        runtimeDir,
+        stateDir,
+        workspaceDir,
+      })
+
+      if (resolved.runtime.entrypoint.kind === "exec") {
+        return {
+          args: resolved.runtime.entrypoint.command.slice(1),
+          command: resolved.runtime.entrypoint.command[0] ?? "",
+          env,
+          port: undefined,
+        }
+      }
+
+      if (!resolved.registration.implementationHooks.start) {
+        return yield* userError(
+          "runtime.buildDockerStartInvocation",
+          `docker backend entrypoint hook is missing a start hook: ${record.implementation}`,
+        )
+      }
+
+      return yield* Effect.tryPromise({
+        try: () =>
+          resolved.registration.implementationHooks.start?.({
+            backend: record.backend,
+            binaryPath: record.entrypointCommand[0] ?? "",
+            config: configEntries,
+            entrypointCommand: record.entrypointCommand,
+            installRoot: record.installRoot,
+            homeDir,
+            record: {
+              implementation: record.implementation,
+              resolvedVersion: record.resolvedVersion,
+            },
+            runtimeDir,
+            stateDir,
+            workspaceDir,
+          }) ?? Promise.reject(new Error("missing start hook")),
+        catch: (cause) =>
+          userError("runtime.buildDockerStartInvocation", cause instanceof Error ? cause.message : String(cause)),
+      })
+    })
+    const buildDockerChatCommand = Effect.fn("ClawctlRuntimeService.buildDockerChatCommand")(function* (
+      record: InstallRecord,
+      runtimeRecord: RuntimeRecord | undefined,
+      message: string,
+    ) {
+      const { registration, runtime } = yield* resolveRuntime(record)
+      const configEntries = yield* resolveSharedConfigEntries()
+      const homeDir = runtimeHomeDir(record.implementation, record.resolvedVersion, record.backend)
+      const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion, record.backend)
+      const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion, record.backend)
+      const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion, record.backend)
+
+      if (runtime.chat.kind === "argv") {
+        return [...runtime.chat.command, message]
+      }
+
+      return yield* Effect.try({
+        try: () =>
+          registration.implementationHooks.buildChatCommand({
+            backend: record.backend,
+            binaryPath: record.entrypointCommand[0] ?? "",
+            config: configEntries,
+            entrypointCommand: record.entrypointCommand,
+            installRoot: record.installRoot,
+            homeDir,
+            message,
+            runtimeDir,
+            stateDir,
+            workspaceDir,
+            ...(runtimeRecord?.port === undefined ? {} : { port: runtimeRecord.port }),
+          }),
+        catch: (cause) =>
+          userError("runtime.buildDockerChatCommand", cause instanceof Error ? cause.message : String(cause)),
+      })
+    })
+    const dockerContainerRef = (record: InstallRecord, runtimeRecord: RuntimeRecord) =>
+      runtimeRecord.containerId ?? runtimeRecord.containerName ?? containerNameForRecord(record)
+    const dockerContainerRunning = Effect.fn("ClawctlRuntimeService.dockerContainerRunning")(function* (
+      record: InstallRecord,
+      runtimeRecord: RuntimeRecord,
+    ) {
+      const ref = dockerContainerRef(record, runtimeRecord)
+      const stdout = yield* runDockerStdout("runtime.dockerInspectRunning", [
+        "inspect",
+        "-f",
+        "{{json .State.Running}}",
+        ref,
+      ]).pipe(Effect.catchAll(() => Effect.succeed("false")))
+      return stdout === "true"
+    })
+    const readDockerLogs = Effect.fn("ClawctlRuntimeService.readDockerLogs")(function* (
+      record: InstallRecord,
+      runtimeRecord: RuntimeRecord,
+    ) {
+      const ref = dockerContainerRef(record, runtimeRecord)
+      return yield* runDockerStdout("runtime.dockerLogs", ["logs", ref]).pipe(Effect.catchAll(() => Effect.succeed("")))
+    })
 
     const readHealthyRuntimeRecord = Effect.fn("ClawctlRuntimeService.readHealthyRuntimeRecord")(function* (
       record: InstallRecord,
@@ -540,6 +724,29 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
         })
         yield* store.writeRuntimeRecord(stoppedRecord)
         return stoppedRecord
+      }
+
+      if (record.backend === "docker") {
+        const running = yield* dockerContainerRunning(record, runtimeRecord)
+        if (!running) {
+          const stoppedRecord = normalizeRuntimeRecord(runtimeRecord, {
+            active: false,
+            lastError: runtimeRecord.lastError ?? "container exited",
+            state: "stopped",
+            stoppedAt: nowIso(),
+          })
+          yield* store.writeRuntimeRecord(stoppedRecord)
+          return stoppedRecord
+        }
+        if (runtimeRecord.state !== "running") {
+          const runningRecord = normalizeRuntimeRecord(runtimeRecord, {
+            active: true,
+            state: "running",
+          })
+          yield* store.writeRuntimeRecord(runningRecord)
+          return runningRecord
+        }
+        return runtimeRecord
       }
 
       const { runtime } = yield* resolveRuntime(record)
@@ -609,16 +816,18 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
 
       const { registration } = yield* resolveRuntime(record)
       const configEntries = yield* resolveSharedConfigEntries()
-      const homeDir = runtimeHomeDir(record.implementation, record.resolvedVersion)
-      const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion)
-      const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion)
-      const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion)
+      const homeDir = runtimeHomeDir(record.implementation, record.resolvedVersion, record.backend)
+      const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion, record.backend)
+      const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion, record.backend)
+      const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion, record.backend)
       if (registration.implementationHooks.chat) {
         return yield* Effect.tryPromise({
           try: () =>
             registration.implementationHooks.chat?.({
+              backend: record.backend,
               binaryPath: record.entrypointCommand[0] ?? "",
               config: configEntries,
+              entrypointCommand: record.entrypointCommand,
               installRoot: record.installRoot,
               homeDir,
               message,
@@ -633,8 +842,10 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
       const commandArgs = yield* Effect.try({
         try: () =>
           registration.implementationHooks.buildChatCommand({
+            backend: record.backend,
             binaryPath: record.entrypointCommand[0] ?? "",
             config: configEntries,
+            entrypointCommand: record.entrypointCommand,
             installRoot: record.installRoot,
             homeDir,
             message,
@@ -661,8 +872,10 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
         ...(yield* Effect.try({
           try: () =>
             registration.implementationHooks.runtimeEnv({
+              backend: record.backend,
               config: configEntries,
               homeDir,
+              entrypointCommand: record.entrypointCommand,
               installRoot: record.installRoot,
               runtimeDir,
               stateDir,
@@ -716,16 +929,18 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
       const parent = path.dirname(logFile)
       yield* withSystemError("runtime.makeLogDir", fs.makeDirectory(parent, { recursive: true }))
 
-      const homeDir = runtimeHomeDir(record.implementation, record.resolvedVersion)
-      const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion)
-      const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion)
-      const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion)
+      const homeDir = runtimeHomeDir(record.implementation, record.resolvedVersion, record.backend)
+      const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion, record.backend)
+      const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion, record.backend)
+      const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion, record.backend)
       const configEntries = yield* resolveSharedConfigEntries()
       const start = yield* Effect.tryPromise({
         try: () =>
           registration.implementationHooks.start?.({
+            backend: record.backend,
             binaryPath: record.entrypointCommand[0] ?? "",
             config: configEntries,
+            entrypointCommand: record.entrypointCommand,
             installRoot: record.installRoot,
             homeDir,
             record: {
@@ -810,10 +1025,110 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
 
       return yield* waitForReady(daemonStartupPolls)
     })
+    const spawnManagedContainerRuntime = Effect.fn("ClawctlRuntimeService.spawnManagedContainerRuntime")(function* (
+      record: InstallRecord,
+    ) {
+      const existing = yield* readHealthyRuntimeRecord(record)
+      if (existing?.state === "running") {
+        return existing
+      }
+
+      yield* store.ensureSharedConfig
+      yield* renderRuntimeConfig(record)
+
+      const resolved = yield* resolveRuntime(record)
+      const start = yield* buildDockerStartInvocation(record, resolved)
+      const image = record.containerImage
+      if (!image) {
+        return yield* userError(
+          "runtime.spawnManagedContainerRuntime",
+          `docker install is missing a container image reference: ${record.implementation}`,
+        )
+      }
+
+      const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion, record.backend)
+      const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion, record.backend)
+      const containerName = containerNameForRecord(record)
+      yield* runDockerExitCode("runtime.removeExistingContainer", ["rm", "-f", containerName]).pipe(
+        Effect.catchAll(() => Effect.succeed(0)),
+      )
+
+      const envArgs = Object.entries({
+        ...process.env,
+        ...start.env,
+        CLAWCTL_ROOT: paths.rootDir,
+      }).flatMap(([key, value]) => (value === undefined ? [] : ["-e", `${key}=${value}`]))
+
+      const containerId = yield* runDockerStdout("runtime.spawnManagedContainerRuntime", [
+        "run",
+        "-d",
+        "--name",
+        containerName,
+        "-w",
+        workspaceDir,
+        "-v",
+        `${runtimeDir}:${runtimeDir}`,
+        ...envArgs,
+        image,
+        start.command,
+        ...start.args,
+      ])
+      if (containerId.length === 0) {
+        return yield* userError(
+          "runtime.spawnManagedContainerRuntime",
+          `failed to start docker runtime for ${record.implementation}`,
+        )
+      }
+
+      const initialRuntimeRecord = yield* buildRuntimeRecord(record, {
+        active: true,
+        containerId,
+        containerName,
+        managedByClawctl: true,
+        proxyMode: "container",
+        startedAt: nowIso(),
+        state: "starting",
+      })
+      yield* store.writeRuntimeRecord(initialRuntimeRecord)
+
+      const waitForReady = (remaining: number): Effect.Effect<RuntimeRecord, ClawctlError> =>
+        Effect.gen(function* () {
+          const runtimeRecord = yield* readHealthyRuntimeRecord(record)
+          if (runtimeRecord?.state === "running") {
+            return runtimeRecord
+          }
+          if (runtimeRecord?.state === "stopped" || runtimeRecord?.state === "failed") {
+            const detail = runtimeRecord.lastError ?? `runtime ${runtimeRecord.state}`
+            const logSource = yield* readRuntimeLogSource(record)
+            const excerpt = yield* readRuntimeLogExcerpt(record)
+            const messageOptions = {
+              ...(excerpt ? { excerpt } : {}),
+              ...(logSource ? { logSource } : {}),
+            }
+            return yield* userError(
+              "runtime.spawnManagedContainerRuntime",
+              startupFailureMessage(record.implementation, detail, messageOptions),
+            )
+          }
+          if (remaining <= 0) {
+            return yield* userError(
+              "runtime.spawnManagedContainerRuntime",
+              `timed out starting runtime for ${record.implementation}`,
+            )
+          }
+          yield* Effect.sleep(daemonStartupSleep)
+          return yield* waitForReady(remaining - 1)
+        })
+
+      return yield* waitForReady(daemonStartupPolls)
+    })
 
     const spawnManagedRuntime = Effect.fn("ClawctlRuntimeService.spawnManagedRuntime")(function* (
       record: InstallRecord,
     ) {
+      if (record.backend === "docker") {
+        return yield* spawnManagedContainerRuntime(record)
+      }
       yield* repairPythonEntrypoints(record)
       const { registration, runtime } = yield* resolveRuntime(record)
       if (runtime.supervision.kind === "native-daemon") {
@@ -916,6 +1231,20 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
       if (!runtimeRecord) {
         return false
       }
+      if (record.backend === "docker") {
+        const ref = dockerContainerRef(record, runtimeRecord)
+        const exitCode = yield* runDockerExitCode("runtime.stopDockerContainer", ["rm", "-f", ref]).pipe(
+          Effect.catchAll(() => Effect.succeed(1)),
+        )
+        yield* store.writeRuntimeRecord(
+          normalizeRuntimeRecord(runtimeRecord, {
+            active: false,
+            state: "stopped",
+            stoppedAt: nowIso(),
+          }),
+        )
+        return exitCode === 0
+      }
       const pid = runtimeRecord.pid
 
       if (pid !== undefined && processAlive(pid)) {
@@ -953,7 +1282,8 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
 
     const activateSelection = Effect.fn("ClawctlRuntimeService.activateSelection")(function* (target: TargetReference) {
       yield* requireInteractableImplementation(target.implementation, "activateSelection")
-      const record = yield* store.resolveInstalledRecord(target.implementation, target.version)
+      const backend = target.backend ?? (yield* resolveConfiguredRuntime())
+      const record = yield* store.resolveInstalledRecord(target.implementation, target.version, backend)
       const current = yield* store.readCurrentSelection
       const previousImplementation = current?.implementation
       if (
@@ -963,7 +1293,7 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
           current.backend !== record.backend)
       ) {
         const currentRecord = yield* store
-          .resolveInstalledRecord(current.implementation, current.version)
+          .resolveInstalledRecord(current.implementation, current.version, current.backend)
           .pipe(Effect.catchAll(() => Effect.void))
         if (currentRecord) {
           yield* stopInstalledRecord(currentRecord)
@@ -1011,6 +1341,7 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
       }
       return yield* activateSelection({
         implementation: record.implementation,
+        backend: record.backend,
         version: record.resolvedVersion,
       })
     })
@@ -1020,6 +1351,36 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
       message: string,
     ) {
       const runtimeRecord = yield* spawnManagedRuntime(record)
+      if (record.backend === "docker") {
+        const { runtime, registration } = yield* resolveRuntime(record)
+        if (runtime.chat.kind === "http") {
+          const response = yield* requestDaemon(record, "/chat", { message })
+          const output = response.output?.trim()
+          if (!output) {
+            return yield* userError("runtime.requestChat", `runtime returned no output: ${record.implementation}`)
+          }
+          return output
+        }
+
+        const commandArgs = yield* buildDockerChatCommand(record, runtimeRecord, message)
+        const [file, ...args] = commandArgs
+        if (!file) {
+          return yield* userError("runtime.requestChat", `runtime returned no command: ${record.implementation}`)
+        }
+        const containerRef = dockerContainerRef(record, runtimeRecord)
+        const stdout = yield* runDockerStdout("runtime.requestDockerChat", ["exec", containerRef, file, ...args])
+        if (registration.implementationHooks.normalizeChatOutput) {
+          return yield* Effect.try({
+            try: () =>
+              registration.implementationHooks.normalizeChatOutput?.({
+                stdout,
+                stderr: "",
+              }) ?? stdout.trim(),
+            catch: (cause) => userError("runtime.requestChat", cause instanceof Error ? cause.message : String(cause)),
+          })
+        }
+        return stdout.trim()
+      }
       const { runtime } = yield* resolveRuntime(record)
       if (runtime.supervision.kind === "native-daemon") {
         return yield* runChatDirect(record, message, runtimeRecord)
@@ -1047,18 +1408,18 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
         )
       }
 
-      const record = yield* store.resolveInstalledRecord(current.implementation, current.version)
+      const record = yield* store.resolveInstalledRecord(current.implementation, current.version, current.backend)
       yield* repairPythonEntrypoints(record)
-      const { registration } = yield* resolveRuntime(record)
+      const { registration, runtime } = yield* resolveRuntime(record)
       if (isInstallOnlyRegistration(registration)) {
         return yield* userError("runtime.runShimmedCommand", installOnlyInteractionMessage(record.implementation))
       }
       const configEntries = yield* resolveSharedConfigEntries()
       const runtimeRecord = yield* readHealthyRuntimeRecord(record)
-      const homeDir = runtimeHomeDir(record.implementation, record.resolvedVersion)
-      const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion)
-      const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion)
-      const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion)
+      const homeDir = runtimeHomeDir(record.implementation, record.resolvedVersion, record.backend)
+      const runtimeDir = runtimeRoot(record.implementation, record.resolvedVersion, record.backend)
+      const stateDir = runtimeStateDir(record.implementation, record.resolvedVersion, record.backend)
+      const workspaceDir = runtimeWorkspaceDir(record.implementation, record.resolvedVersion, record.backend)
       yield* renderRuntimeConfig(record)
 
       const env = {
@@ -1066,8 +1427,10 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
         ...(yield* Effect.try({
           try: () =>
             registration.implementationHooks.runtimeEnv({
+              backend: record.backend,
               config: configEntries,
               homeDir,
+              entrypointCommand: record.entrypointCommand,
               installRoot: record.installRoot,
               runtimeDir,
               stateDir,
@@ -1082,8 +1445,10 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
 
       const command =
         registration.implementationHooks.buildShimCommand?.({
+          backend: record.backend,
           binaryPath: record.entrypointCommand[0] ?? "",
           config: configEntries,
+          entrypointCommand: record.entrypointCommand,
           homeDir,
           installRoot: record.installRoot,
           runtimeDir,
@@ -1092,6 +1457,35 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
           ...(runtimeRecord?.port === undefined ? {} : { port: runtimeRecord.port }),
           args,
         }) ?? record.entrypointCommand
+
+      if (record.backend === "docker") {
+        const runtimeRecord = yield* spawnManagedRuntime(record)
+        const containerRef = dockerContainerRef(record, runtimeRecord)
+        const baseCommand =
+          command.length > 0 ? command : runtime.entrypoint.kind === "exec" ? runtime.entrypoint.command : []
+        const [file, ...fixedArgs] = baseCommand
+        if (!file) {
+          return yield* userError(
+            "runtime.runShimmedCommand",
+            `implementation does not expose a direct shim command: ${record.implementation}`,
+          )
+        }
+        const child = yield* Effect.try({
+          try: () =>
+            spawn(dockerExecutable(), ["exec", containerRef, file, ...fixedArgs, ...args], { stdio: "inherit" }),
+          catch: (cause) => userError("runtime.runShimmedCommand", String(cause)),
+        })
+        return yield* Effect.tryPromise({
+          try: () =>
+            new Promise<number>((resolvePromise, reject) => {
+              child.once("error", reject)
+              child.once("exit", (code) => {
+                resolvePromise(code ?? 1)
+              })
+            }),
+          catch: (cause) => userError("runtime.runShimmedCommand", String(cause)),
+        })
+      }
 
       const [file, ...fixedArgs] = command
       if (!file) {
@@ -1147,20 +1541,27 @@ CLAWCTL_ROOT=${shellQuote(paths.rootDir)} exec ${[command, ...fixedArgs, shimSen
       } satisfies RuntimeSnapshot
     })
 
-    const stopSelection = Effect.fn("ClawctlRuntimeService.stopSelection")(function* (target: Option.Option<string>) {
+    const stopSelection = Effect.fn("ClawctlRuntimeService.stopSelection")(function* (
+      target: Option.Option<string>,
+      backend?: RuntimeBackend,
+    ) {
       const resolvedTarget = target._tag === "Some" ? target.value : undefined
       let record: InstallRecord | undefined
       const current = yield* store.readCurrentSelection
       if (resolvedTarget) {
         const parsed = yield* parseReference(resolvedTarget)
         yield* requireInteractableImplementation(parsed.implementation, "stopSelection")
-        record = yield* store.resolveInstalledRecord(parsed.implementation, parsed.version)
+        record = yield* store.resolveInstalledRecord(
+          parsed.implementation,
+          parsed.version,
+          backend ?? (yield* resolveConfiguredRuntime()),
+        )
       } else {
         if (!current) {
           return { stopped: false } satisfies StopSelectionResult
         }
         yield* requireInteractableImplementation(current.implementation, "stopSelection")
-        record = yield* store.resolveInstalledRecord(current.implementation, current.version)
+        record = yield* store.resolveInstalledRecord(current.implementation, current.version, current.backend)
       }
 
       const stopped = yield* stopInstalledRecord(record)
@@ -1265,7 +1666,7 @@ export async function maybeRunManagedDaemon(argv: string[]): Promise<boolean> {
   }).pipe(Effect.provide(layer as never)) as unknown as Effect.Effect<DaemonServices, never, never>
   const { paths, runtime, store } = await Effect.runPromise(daemonServicesEffect)
   const record = (await Effect.runPromise(
-    provided(store.resolveInstalledRecord(parsed.implementation, parsed.version)),
+    provided(store.resolveInstalledRecord(parsed.implementation, parsed.version, parsed.backend)),
   )) as InstallRecord
   await Effect.runPromise(provided(runtime.prepareRuntime(record)))
 

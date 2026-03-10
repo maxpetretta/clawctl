@@ -119,24 +119,13 @@ afterEach(async () => {
 })
 
 describe("runtime service", () => {
-  test("startupFailureMessage explains stock nanoclaw channel requirements", () => {
-    const message = startupFailureMessage("nanoclaw", "process exited", {
-      logSource: "[16:45:23.080] FATAL (95327): No channels connected",
-      excerpt: "No channels connected",
+  test("startupFailureMessage includes the latest excerpt when available", () => {
+    const message = startupFailureMessage("openclaw", "process exited", {
+      excerpt: "last log line",
     })
 
-    expect(message).toContain("stock nanoclaw has no channels configured")
-    expect(message).toContain("/add-telegram")
-  })
-
-  test("startupFailureMessage explains nanoclaw native module rebuild failures", () => {
-    const message = startupFailureMessage("nanoclaw", "process exited", {
-      logSource: 'Error: foo\n"code": "ERR_DLOPEN_FAILED"',
-      excerpt: "ERR_DLOPEN_FAILED",
-    })
-
-    expect(message).toContain("native module load failed")
-    expect(message).toContain("clawctl uninstall --all nanoclaw && clawctl install nanoclaw")
+    expect(message).toContain("failed starting runtime for openclaw: process exited")
+    expect(message).toContain("last log line")
   })
 
   test("ensureActiveChatTarget uses the current selection", async () => {
@@ -175,63 +164,6 @@ describe("runtime service", () => {
         makeRuntimeTestLayer(root),
       ),
     ).rejects.toThrow("no active claw selected")
-  })
-
-  test("rejects install-only adapters before attempting chat activation", async () => {
-    const root = await createRoot()
-    const record: InstallRecord = {
-      ...installRecord(root),
-      implementation: "nanoclaw",
-      installStrategy: "repo-bootstrap",
-      installRoot: join(root, "installs", "local", "nanoclaw", "main"),
-      entrypointCommand: [],
-      requestedVersion: "main",
-      resolvedVersion: "main",
-      supportTier: "tier3",
-    }
-
-    await expect(
-      runWithLayer(
-        Effect.gen(function* () {
-          const store = yield* ClawctlStoreService
-          const runtime = yield* ClawctlRuntimeService
-          yield* store.writeInstallRecord(record)
-          return yield* runtime.ensureActiveChatTarget(Option.some("nanoclaw"), "chat")
-        }),
-        makeRuntimeTestLayer(root),
-      ),
-    ).rejects.toThrow("nanoclaw is install-only in clawctl; it is not interactable or executable")
-  })
-
-  test("rejects shim execution for install-only adapters", async () => {
-    const root = await createRoot()
-    const record: InstallRecord = {
-      ...installRecord(root),
-      implementation: "bitclaw",
-      installStrategy: "repo-bootstrap",
-      installRoot: join(root, "installs", "local", "bitclaw", "main"),
-      entrypointCommand: [join(root, "tools", "bitclaw")],
-      requestedVersion: "main",
-      resolvedVersion: "main",
-      supportTier: "tier3",
-    }
-
-    await expect(
-      runWithLayer(
-        Effect.gen(function* () {
-          const store = yield* ClawctlStoreService
-          const runtime = yield* ClawctlRuntimeService
-          yield* store.writeInstallRecord(record)
-          yield* store.writeCurrentSelection({
-            implementation: record.implementation,
-            version: record.resolvedVersion,
-            backend: record.backend,
-          })
-          return yield* runtime.runShimmedCommand("bitclaw", [])
-        }),
-        makeRuntimeTestLayer(root),
-      ),
-    ).rejects.toThrow("bitclaw is install-only in clawctl; it is not interactable or executable")
   })
 
   test("activateSelection writes rendered config and current state", async () => {

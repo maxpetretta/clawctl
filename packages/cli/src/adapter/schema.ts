@@ -172,6 +172,7 @@ export type DockerBuildInstallManifest = InstallCommon & {
   context: string
   dockerfile?: string
   image?: string
+  entrypointCommand: string[]
 }
 
 export type SourceBuildInstallManifest = InstallCommon & {

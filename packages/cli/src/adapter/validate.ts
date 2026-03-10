@@ -32,6 +32,7 @@ export function validateAdapterRegistration(registration: RegisteredImplementati
     }
 
     if (
+      backend.supported &&
       backend.runtime.supervision.kind === "unmanaged" &&
       (manifest.capabilities.chat || manifest.capabilities.ping)
     ) {

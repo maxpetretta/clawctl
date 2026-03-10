@@ -33,7 +33,7 @@ const versionOption: HelpRow = {
 
 const runtimeOption: HelpRow = {
   name: "--runtime <local|docker>",
-  description: "Choose a runtime backend. `local` is the only backend implemented today.",
+  description: "Choose a runtime backend. Defaults to the configured CLAW_RUNTIME value.",
 }
 
 const targetArgument: HelpRow = {
@@ -68,7 +68,7 @@ const shellArgument: HelpRow = {
 
 const installCommand: HelpEntry = {
   name: "install",
-  summary: "Install a claw into the local clawctl store.",
+  summary: "Install a claw into the clawctl store for the selected runtime backend.",
   usage: "clawctl install [OPTIONS] TARGET",
   args: [targetArgument],
   options: [runtimeOption, helpOption],

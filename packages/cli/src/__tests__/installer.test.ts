@@ -100,7 +100,7 @@ exit 1
     const record = await runWithLayer(
       Effect.gen(function* () {
         const installer = yield* ClawctlInstallerService
-        return yield* installer.installImplementation("nanobot")
+        return yield* installer.installImplementation("nanobot", "local")
       }),
       makeInstallerTestLayer(root),
     )

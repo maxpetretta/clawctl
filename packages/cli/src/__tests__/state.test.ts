@@ -27,8 +27,11 @@ function record(
     requestedVersion: input.requestedVersion ?? input.resolvedVersion,
     resolvedVersion: input.resolvedVersion,
     backend: input.backend ?? "local",
+    ...(input.containerImage === undefined ? {} : { containerImage: input.containerImage }),
     installStrategy: input.installStrategy ?? "github-release",
-    installRoot: input.installRoot ?? join(root, "installs", "local", input.implementation, input.resolvedVersion),
+    installRoot:
+      input.installRoot ??
+      join(root, "installs", input.backend ?? "local", input.implementation, input.resolvedVersion),
     entrypointCommand: input.entrypointCommand ?? ["/bin/echo"],
     platform: input.platform ?? { os: "darwin", arch: "arm64" },
     sourceReference: input.sourceReference ?? "fixture",
@@ -57,6 +60,7 @@ describe("store service", () => {
     )
 
     expect(config.CLAW_MODEL).toBe("moonshotai/kimi-k2.5")
+    expect(config.CLAW_RUNTIME).toBe("local")
     expect(String(config.CLAW_API_KEY)).toBe("<redacted>")
   })
 
@@ -115,6 +119,53 @@ describe("store service", () => {
       backend: "local",
     })
     expect(current.second).toBeUndefined()
+  })
+
+  test("resolves backend-specific installs and rejects ambiguous backend lookups", async () => {
+    const root = await createRoot()
+
+    const records = await runWithLayer(
+      Effect.gen(function* () {
+        const store = yield* ClawctlStoreService
+        yield* store.writeInstallRecord(
+          record(root, {
+            backend: "local",
+            implementation: "sampleclaw",
+            resolvedVersion: "v1.0.0",
+          }),
+        )
+        yield* store.writeInstallRecord(
+          record(root, {
+            backend: "docker",
+            containerImage: "sampleclaw:v1.0.0",
+            entrypointCommand: [],
+            implementation: "sampleclaw",
+            installRoot: join(root, "installs", "docker", "sampleclaw", "v1.0.0"),
+            installStrategy: "docker-build",
+            resolvedVersion: "v1.0.0",
+          }),
+        )
+
+        return {
+          docker: yield* store.resolveInstalledRecord("sampleclaw", "v1.0.0", "docker"),
+          local: yield* store.resolveInstalledRecord("sampleclaw", "v1.0.0", "local"),
+        }
+      }),
+      makeStoreTestLayer(root),
+    )
+
+    expect(records.local.backend).toBe("local")
+    expect(records.docker.backend).toBe("docker")
+
+    await expect(
+      runWithLayer(
+        Effect.gen(function* () {
+          const store = yield* ClawctlStoreService
+          return yield* store.resolveInstalledRecord("sampleclaw", "v1.0.0")
+        }),
+        makeStoreTestLayer(root),
+      ),
+    ).rejects.toThrow("version is installed for multiple backends: sampleclaw@v1.0.0")
   })
 
   test("cleans partial installs and orphaned runtimes and removes installs", async () => {

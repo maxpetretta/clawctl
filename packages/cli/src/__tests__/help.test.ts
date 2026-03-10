@@ -49,13 +49,13 @@ describe("clawctl root help", () => {
 
   test("subcommand help is custom-rendered from metadata", async () => {
     const output = await runHelp(["install", "--help"])
-    expect(output).toContain("Install a claw into the local clawctl store.")
+    expect(output).toContain("Install a claw into the clawctl store for the selected runtime backend.")
     expect(output).toContain("Usage:\n  clawctl install [OPTIONS] TARGET")
     expect(output).toContain(
       "Arguments:\n  TARGET  Claw implementation, optionally pinned as <implementation>@<version>.",
     )
     expect(output).toContain(
-      "Options:\n  --runtime <local|docker>  Choose a runtime backend. `local` is the only backend implemented today.",
+      "Options:\n  --runtime <local|docker>  Choose a runtime backend. Defaults to the configured CLAW_RUNTIME value.",
     )
     expect(output).toContain("Examples:\n  clawctl install openclaw")
     expect(output).not.toContain("A user-defined piece of text.")

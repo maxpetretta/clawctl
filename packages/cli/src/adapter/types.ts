@@ -5,6 +5,7 @@ export type InstallRecord = {
   requestedVersion: string
   resolvedVersion: string
   backend: BackendKind
+  containerImage?: string
   installStrategy: string
   installRoot: string
   entrypointCommand: string[]
@@ -19,12 +20,14 @@ export type RuntimeRecord = {
   implementation: string
   version: string
   backend: BackendKind
+  containerId?: string
+  containerName?: string
   runtimeRoot: string
   active: boolean
   managedByClawctl: boolean
   pid?: number
   port?: number
-  proxyMode: "proxy" | "native-daemon"
+  proxyMode: "proxy" | "native-daemon" | "container"
   state: "starting" | "running" | "stopped" | "failed"
   startedAt?: string
   stoppedAt?: string

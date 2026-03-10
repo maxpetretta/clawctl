@@ -18,7 +18,9 @@ const config = {
 
 describe("adapter registry", () => {
   const runtimeInput = {
+    backend: "local" as const,
     config,
+    entrypointCommand: ["/bin/tool"],
     homeDir: "/tmp/home",
     installRoot: "/tmp/install",
     runtimeDir: "/tmp/runtime",
@@ -34,17 +36,13 @@ describe("adapter registry", () => {
       "openclaw",
       "nanobot",
       "hermes",
-      "nanoclaw",
-      "bitclaw",
-      "ironclaw",
-      "piclaw",
     ])
     expect(() => validateAdapterRegistry()).not.toThrow()
   })
 
   test("resolves backends and rejects unknown adapters", () => {
     expect(getBackendManifest("openclaw", "local")?.kind).toBe("local")
-    expect(getBackendManifest("piclaw", "docker")?.kind).toBe("docker")
+    expect(getBackendManifest("openclaw", "docker")?.kind).toBe("docker")
     expect(() => getRegisteredImplementation("ghostclaw")).toThrow("unsupported implementation: ghostclaw")
   })
 
@@ -82,9 +80,10 @@ describe("adapter registry", () => {
     ])
     expect(
       hermes.implementationHooks.buildChatCommand({
-        binaryPath: "/tmp/install/repo/venv/bin/python",
-        message: "hi",
         ...runtimeInput,
+        binaryPath: "/tmp/install/repo/venv/bin/python",
+        entrypointCommand: ["/tmp/install/repo/venv/bin/python", "-m", "hermes_cli.main"],
+        message: "hi",
       }),
     ).toEqual(["/tmp/install/repo/venv/bin/python", "/tmp/install/clawctl-hermes-chat.py", "hi"])
 
@@ -171,13 +170,9 @@ describe("adapter registry", () => {
     })
   })
 
-  test("supports openclaw output normalization and experimental adapters", () => {
+  test("supports openclaw output normalization and hermes bootstrap hooks", () => {
     const openclaw = getRegisteredImplementation("openclaw")
     const hermes = getRegisteredImplementation("hermes")
-    const nanoclaw = getRegisteredImplementation("nanoclaw")
-    const bitclaw = getRegisteredImplementation("bitclaw")
-    const ironclaw = getRegisteredImplementation("ironclaw")
-    const piclaw = getRegisteredImplementation("piclaw")
 
     expect(
       openclaw.implementationHooks.normalizeChatOutput?.({ stdout: '{"response":{"text":"alpha"}}', stderr: "" }),
@@ -204,46 +199,35 @@ describe("adapter registry", () => {
     expect(hermes.implementationHooks.start).toBeDefined()
     expect(hermes.implementationHooks.status).toBeDefined()
     expect(isInstallOnlyRegistration(hermes)).toBe(false)
-    expect(nanoclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi", ...runtimeInput })).toEqual(
-      [],
-    )
-    expect(bitclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi", ...runtimeInput })).toEqual([])
-    expect(nanoclaw.implementationHooks.buildShimCommand).toBeUndefined()
-    expect(bitclaw.implementationHooks.buildShimCommand).toBeUndefined()
-    expect(ironclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi", ...runtimeInput })).toEqual(
-      [],
-    )
-    expect(piclaw.implementationHooks.buildChatCommand({ binaryPath: "", message: "hi", ...runtimeInput })).toEqual([])
-    expect(nanoclaw.manifest.backends[0]?.install[0]?.versionSource).toEqual({
-      kind: "adapter-hook",
-      hook: "resolveVersions",
+    expect(
+      hermes.implementationHooks.buildChatCommand({
+        ...runtimeInput,
+        backend: "docker",
+        binaryPath: "/usr/local/bin/hermes",
+        entrypointCommand: ["/usr/local/bin/hermes"],
+        message: "hi",
+      }),
+    ).toEqual(["/opt/hermes/venv/bin/python", "/opt/hermes/clawctl-hermes-chat.py", "hi"])
+    expect(
+      hermes.implementationHooks.runtimeEnv({
+        ...runtimeInput,
+        backend: "docker",
+        entrypointCommand: ["/usr/local/bin/hermes"],
+      }),
+    ).toEqual({
+      HOME: "/tmp/home",
+      HERMES_HOME: "/tmp/home",
+      TERMINAL_CWD: "/tmp/workspace",
+      MSWEA_GLOBAL_CONFIG_DIR: "/tmp/home",
+      MSWEA_SILENT_STARTUP: "1",
+      HERMES_QUIET: "1",
+      NO_COLOR: "1",
+      CI: "1",
+      PATH: `/opt/hermes/venv/bin:/opt/hermes/repo/node_modules/.bin:${process.env.PATH ?? ""}`,
     })
-    expect(piclaw.manifest.backends[1]?.install[0]?.versionSource).toEqual({
-      kind: "git-tags",
-      repository: "https://github.com/rcarmo/piclaw.git",
-    })
-    expect(nanoclaw.implementationHooks.resolveVersions).toBeDefined()
-    expect(nanoclaw.implementationHooks.install).toBeDefined()
-    expect(nanoclaw.implementationHooks.start).toBeUndefined()
-    expect(nanoclaw.implementationHooks.status).toBeUndefined()
-    expect(isInstallOnlyRegistration(nanoclaw)).toBe(true)
-    expect(bitclaw.implementationHooks.install).toBeDefined()
-    expect(bitclaw.implementationHooks.start).toBeUndefined()
-    expect(bitclaw.implementationHooks.status).toBeUndefined()
-    expect(bitclaw.implementationHooks.chat).toBeUndefined()
-    expect(bitclaw.manifest.capabilities.chat).toBe(false)
-    expect(bitclaw.manifest.capabilities.ping).toBe(false)
-    expect(isInstallOnlyRegistration(bitclaw)).toBe(true)
-    expect(isInstallOnlyRegistration(ironclaw)).toBe(true)
-    expect(isInstallOnlyRegistration(piclaw)).toBe(true)
-    expect(installOnlyInteractionMessage("bitclaw")).toBe(
-      "bitclaw is install-only in clawctl; it is not interactable or executable",
+    expect(installOnlyInteractionMessage("ghostclaw")).toBe(
+      "ghostclaw is install-only in clawctl; it is not interactable or executable",
     )
-    expect(ironclaw.manifest.backends[0]?.install[0]).toMatchObject({
-      strategy: "github-release",
-      repository: "nearai/ironclaw",
-      versionSource: { kind: "github-releases", repository: "nearai/ironclaw" },
-    })
   })
 
   test("validates invalid adapter registrations", () => {

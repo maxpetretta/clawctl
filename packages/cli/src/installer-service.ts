@@ -9,6 +9,7 @@ import * as HttpClientResponse from "@effect/platform/HttpClientResponse"
 import { Context, Effect, Layer } from "effect"
 import * as Schema from "effect/Schema"
 import type {
+  DockerBuildInstallManifest,
   GithubReleaseInstallManifest,
   InstallManifest,
   NpmPackageInstallManifest,
@@ -19,18 +20,23 @@ import type {
 import type { InstallRecord } from "./adapter/types.ts"
 import { ensureClawctlDirectories } from "./directory-helpers.ts"
 import { type ClawctlError, type ClawctlSystemError, userError, withSystemError } from "./errors.ts"
+import type { RuntimeBackend } from "./model.ts"
 import { ClawctlPathsService } from "./paths-service.ts"
 import { requireV1HostPlatform } from "./platform.ts"
 import { makeResolveRegistration } from "./service-helpers.ts"
 import { ClawctlStoreService } from "./store-service.ts"
-import { gitExecutable, npmExecutable, uvExecutable } from "./tooling.ts"
+import { dockerExecutable, gitExecutable, npmExecutable, uvExecutable } from "./tooling.ts"
 
 type ClawctlInstallerApi = {
   readonly installImplementation: (
     implementation: string,
+    backend: RuntimeBackend,
     version?: string,
   ) => Effect.Effect<InstallRecord, ClawctlError>
-  readonly listRemoteVersions: (implementation: string) => Effect.Effect<ReadonlyArray<string>, ClawctlError>
+  readonly listRemoteVersions: (
+    implementation: string,
+    backend?: RuntimeBackend,
+  ) => Effect.Effect<ReadonlyArray<string>, ClawctlError>
 }
 
 export class ClawctlInstallerService extends Context.Tag("@clawctl/cli/ClawctlInstallerService")<
@@ -120,6 +126,17 @@ function pypiApiOrigin(): string {
 
 function stageToken(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function sanitizeContainerTag(value: string): string {
+  return value.replaceAll(/[^A-Za-z0-9_.-]+/gu, "-")
+}
+
+function resolveDockerBuildContext(context: string, version: string): string {
+  if (!context.includes(".git")) {
+    return context
+  }
+  return `${context}#${version}`
 }
 
 function createInstallRecord(
@@ -346,8 +363,9 @@ export const ClawctlInstallerLive = Layer.effect(
       stageRoot: string,
       implementationId: string,
       version: string,
+      backend: RuntimeBackend = "local",
     ) {
-      const destinationRoot = installRoot(implementationId, version)
+      const destinationRoot = installRoot(implementationId, version, backend)
       yield* withSystemError(
         "installer.removeExistingInstall",
         fs.remove(destinationRoot, { recursive: true, force: true }),
@@ -546,7 +564,7 @@ export const ClawctlInstallerLive = Layer.effect(
       const release = yield* requestJson("installer.fetchGithubRelease", releaseUrl, GithubReleaseResponseSchema)
       const { asset, host, rule } = yield* selectAsset(strategy, release.assets)
       const resolvedVersion = release.tag_name
-      const stageRoot = partialInstallRoot(implementationId, resolvedVersion, stageToken())
+      const stageRoot = partialInstallRoot(implementationId, resolvedVersion, stageToken(), "local")
       const cacheDir = path.resolve(paths.cacheDir, "downloads", implementationId, resolvedVersion)
       yield* withSystemError("installer.makeCacheDir", fs.makeDirectory(cacheDir, { recursive: true }))
       yield* withSystemError("installer.makeStageDir", fs.makeDirectory(stageRoot, { recursive: true }))
@@ -556,7 +574,7 @@ export const ClawctlInstallerLive = Layer.effect(
       yield* withSystemError("installer.writeReleaseAsset", fs.writeFile(assetPath, assetBytes))
       const verificationSummary = yield* verifyChecksum(strategy, release.assets, asset.name, assetPath, cacheDir)
       yield* materializeReleaseBinary(assetPath, rule.archive, stageRoot, implementationId)
-      const installRootPath = yield* finalizeInstall(stageRoot, implementationId, resolvedVersion)
+      const installRootPath = yield* finalizeInstall(stageRoot, implementationId, resolvedVersion, "local")
 
       return createInstallRecord(implementationId, supportTier, {
         backend: "local",
@@ -578,7 +596,7 @@ export const ClawctlInstallerLive = Layer.effect(
       requestedVersion?: string,
     ) {
       const resolvedVersion = yield* resolveNpmVersion(strategy, requestedVersion)
-      const stageRoot = partialInstallRoot(implementationId, resolvedVersion, stageToken())
+      const stageRoot = partialInstallRoot(implementationId, resolvedVersion, stageToken(), "local")
       yield* withSystemError("installer.makeStageDir", fs.makeDirectory(stageRoot, { recursive: true }))
       yield* withSystemError(
         "installer.writeNpmPackageJson",
@@ -601,7 +619,7 @@ export const ClawctlInstallerLive = Layer.effect(
 
       const binaryPath = path.resolve(stageRoot, "node_modules", ".bin", strategy.binName)
       yield* withSystemError("installer.checkNpmBinary", fs.access(binaryPath))
-      const installRootPath = yield* finalizeInstall(stageRoot, implementationId, resolvedVersion)
+      const installRootPath = yield* finalizeInstall(stageRoot, implementationId, resolvedVersion, "local")
       const hostPlatform = yield* requireHostPlatform()
 
       return createInstallRecord(implementationId, supportTier, {
@@ -631,7 +649,7 @@ export const ClawctlInstallerLive = Layer.effect(
       }
 
       const resolvedVersion = yield* resolvePythonVersion(strategy, requestedVersion)
-      const stageRoot = partialInstallRoot(implementationId, resolvedVersion, stageToken())
+      const stageRoot = partialInstallRoot(implementationId, resolvedVersion, stageToken(), "local")
       const venvRoot = path.resolve(stageRoot, "venv")
       const venvPython = path.resolve(venvRoot, "bin", "python")
       const stageBinDir = path.resolve(stageRoot, "bin")
@@ -652,7 +670,7 @@ export const ClawctlInstallerLive = Layer.effect(
       yield* withSystemError("installer.makePythonBinDir", fs.makeDirectory(stageBinDir, { recursive: true }))
       yield* withSystemError("installer.linkPythonBinary", fs.copyFile(binaryPath, stageEntrypoint))
       yield* withSystemError("installer.checkLinkedPythonBinary", fs.access(stageEntrypoint))
-      const installRootPath = yield* finalizeInstall(stageRoot, implementationId, resolvedVersion)
+      const installRootPath = yield* finalizeInstall(stageRoot, implementationId, resolvedVersion, "local")
       yield* rewriteInstalledPythonEntrypoints(stageRoot, installRootPath, strategy.entrypoint)
       const hostPlatform = yield* requireHostPlatform()
 
@@ -678,7 +696,7 @@ export const ClawctlInstallerLive = Layer.effect(
       const registration = yield* resolveRegistration(implementationId)
       const resolvedVersion =
         requestedVersion ?? (yield* resolveDefaultVersion(implementationId, strategy.versionSource))
-      const stageRoot = partialInstallRoot(implementationId, resolvedVersion, stageToken())
+      const stageRoot = partialInstallRoot(implementationId, resolvedVersion, stageToken(), "local")
       const repoDir = path.resolve(stageRoot, "repo")
       yield* withSystemError("installer.makeStageDir", fs.makeDirectory(stageRoot, { recursive: true }))
 
@@ -718,7 +736,7 @@ export const ClawctlInstallerLive = Layer.effect(
             })).entrypointCommand
           : []
 
-      const installRootPath = yield* finalizeInstall(stageRoot, implementationId, resolvedVersion)
+      const installRootPath = yield* finalizeInstall(stageRoot, implementationId, resolvedVersion, "local")
       const hostPlatform = yield* requireHostPlatform()
 
       return createInstallRecord(implementationId, supportTier, {
@@ -731,6 +749,55 @@ export const ClawctlInstallerLive = Layer.effect(
         resolvedVersion,
         sourceReference: strategy.repository,
         verificationSummary: "git-clone",
+      })
+    })
+
+    const installDockerBuild = Effect.fn("ClawctlInstallerService.installDockerBuild")(function* (
+      implementationId: string,
+      supportTier: InstallRecord["supportTier"],
+      strategy: DockerBuildInstallManifest,
+      requestedVersion?: string,
+    ) {
+      const resolvedVersion =
+        requestedVersion ?? (yield* resolveDefaultVersion(implementationId, strategy.versionSource))
+      const stageRoot = partialInstallRoot(implementationId, resolvedVersion, stageToken(), "docker")
+      yield* withSystemError("installer.makeDockerStageDir", fs.makeDirectory(stageRoot, { recursive: true }))
+
+      const imageBase = strategy.image ?? `clawctl/${implementationId}`
+      const imageTag = `${imageBase}:${sanitizeContainerTag(resolvedVersion)}`
+      const context = resolveDockerBuildContext(strategy.context, resolvedVersion)
+      const buildArgs = [
+        "build",
+        "-t",
+        imageTag,
+        "--build-arg",
+        `CLAW_VERSION=${resolvedVersion}`,
+        ...(strategy.dockerfile ? ["-f", strategy.dockerfile] : []),
+        context,
+      ]
+      yield* runCommand("installer.installDockerBuild", dockerExecutable(), buildArgs, {
+        env: process.env,
+      })
+
+      yield* withSystemError(
+        "installer.writeDockerMetadata",
+        fs.writeFileString(path.resolve(stageRoot, "docker-image.txt"), `${imageTag}\n`),
+      )
+
+      const installRootPath = yield* finalizeInstall(stageRoot, implementationId, resolvedVersion, "docker")
+      const hostPlatform = yield* requireHostPlatform()
+
+      return createInstallRecord(implementationId, supportTier, {
+        backend: "docker",
+        containerImage: imageTag,
+        entrypointCommand: [...strategy.entrypointCommand],
+        installRoot: installRootPath,
+        installStrategy: strategy.strategy,
+        platform: hostPlatform,
+        requestedVersion: requestedVersion ?? "latest",
+        resolvedVersion,
+        sourceReference: context,
+        verificationSummary: "docker-build",
       })
     })
 
@@ -749,29 +816,35 @@ export const ClawctlInstallerLive = Layer.effect(
           return yield* installPythonPackage(implementationId, supportTier, strategy, requestedVersion)
         case "repo-bootstrap":
           return yield* installRepoBootstrap(implementationId, supportTier, strategy, requestedVersion)
+        case "docker-build":
+          return yield* installDockerBuild(implementationId, supportTier, strategy, requestedVersion)
         default:
           return yield* userError(
             "installer.installWithStrategy",
-            `local install strategy is not implemented for ${implementationId}: ${strategy.strategy}`,
+            `install strategy is not implemented for ${implementationId}: ${strategy.strategy}`,
           )
       }
     })
 
     const installImplementation = Effect.fn("ClawctlInstallerService.installImplementation")(function* (
       implementation: string,
+      backendKind: RuntimeBackend,
       version?: string,
     ) {
       const registration = yield* resolveRegistration(implementation)
-      const backend = registration.manifest.backends.find((entry) => entry.kind === "local" && entry.supported)
+      const backend = registration.manifest.backends.find((entry) => entry.kind === backendKind && entry.supported)
       if (!backend) {
-        return yield* userError("installer.installImplementation", `local backend is not supported: ${implementation}`)
+        return yield* userError(
+          "installer.installImplementation",
+          `${backendKind} backend is not supported: ${implementation}`,
+        )
       }
 
       const [strategy] = backend.install
       if (!strategy) {
         return yield* userError(
           "installer.installImplementation",
-          `local install strategy is not configured for ${implementation}`,
+          `${backendKind} install strategy is not configured for ${implementation}`,
         )
       }
 
@@ -785,9 +858,9 @@ export const ClawctlInstallerLive = Layer.effect(
       ])
       yield* withSystemError(
         "installer.ensureInstallParent",
-        fs.makeDirectory(installParentDir(implementation), { recursive: true }),
+        fs.makeDirectory(installParentDir(implementation, backendKind), { recursive: true }),
       )
-      yield* store.cleanupPartialInstallDirectories(implementation)
+      yield* store.cleanupPartialInstallDirectories(implementation, backendKind)
 
       const record = yield* installWithStrategy(
         implementation,
@@ -796,24 +869,28 @@ export const ClawctlInstallerLive = Layer.effect(
         version,
       ).pipe(
         Effect.catchAll((error) =>
-          store.cleanupPartialInstallDirectories(implementation).pipe(Effect.zipRight(Effect.fail(error))),
+          store.cleanupPartialInstallDirectories(implementation, backendKind).pipe(Effect.zipRight(Effect.fail(error))),
         ),
       )
 
       yield* store.writeInstallRecord(record)
-      yield* store.cleanupPartialInstallDirectories(implementation)
+      yield* store.cleanupPartialInstallDirectories(implementation, backendKind)
       return record
     })
 
     const listRemoteVersions = Effect.fn("ClawctlInstallerService.listRemoteVersions")(function* (
       implementation: string,
+      backendKind?: RuntimeBackend,
     ) {
       const registration = yield* resolveRegistration(implementation)
-      const backend = registration.manifest.backends.find((entry) => entry.supported && entry.install.length > 0)
+      const backend = registration.manifest.backends.find(
+        (entry) =>
+          entry.supported && entry.install.length > 0 && (backendKind === undefined || entry.kind === backendKind),
+      )
       if (!backend) {
         return yield* userError(
           "installer.listRemoteVersions",
-          `no supported install backend is configured for ${implementation}`,
+          `no supported install backend is configured for ${implementation}${backendKind ? ` (${backendKind})` : ""}`,
         )
       }
 

@@ -1,5 +1,8 @@
+import type { RuntimeBackend } from "./model.ts"
+
 export type TargetReference = {
   implementation: string
+  backend?: RuntimeBackend
   version?: string
 }
 

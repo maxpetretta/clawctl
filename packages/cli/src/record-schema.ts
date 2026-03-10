@@ -8,6 +8,7 @@ export const PlatformSelectorSchema = Schema.Struct({
 
 export const InstallRecordSchema = Schema.Struct({
   backend: Schema.String,
+  containerImage: Schema.optional(Schema.String),
   entrypointCommand: Schema.Array(Schema.String),
   implementation: Schema.String,
   installRoot: Schema.String,
@@ -30,6 +31,8 @@ export const CurrentSelectionSchema = Schema.Struct({
 export const RuntimeRecordSchema = Schema.Struct({
   active: Schema.Boolean,
   backend: Schema.String,
+  containerId: Schema.optional(Schema.String),
+  containerName: Schema.optional(Schema.String),
   implementation: Schema.String,
   lastError: Schema.optional(Schema.String),
   managedByClawctl: Schema.Boolean,

@@ -236,6 +236,16 @@ export const ClawctlMaintenanceLive = Layer.effect(
             ok: true,
             detail: `installed via ${record.installStrategy}`,
           })
+          if (record.backend === "docker") {
+            checks.push({
+              label: `${implementationId}:entrypoint:${record.resolvedVersion}`,
+              ok: entrypoint !== undefined && entrypoint.length > 0,
+              detail: entrypoint
+                ? `container command: ${record.entrypointCommand.join(" ")}`
+                : "no container entrypoint declared",
+            })
+            continue
+          }
           if (!entrypoint) {
             checks.push({
               label: `${implementationId}:entrypoint:${record.resolvedVersion}`,
@@ -261,25 +271,35 @@ export const ClawctlMaintenanceLive = Layer.effect(
     const runCleanup = Effect.fn("ClawctlMaintenanceService.runCleanup")(function* (target?: string) {
       yield* ensureClawctlDirectories(fs, paths, "maintenance.ensure", ["root", "install", "runtime"])
 
-      const installImplementations = yield* listSubdirectories(path.resolve(paths.installDir, "local"))
-      const runtimeImplementations = yield* listSubdirectories(path.resolve(paths.runtimeDir, "local"))
-      const targets =
-        target === undefined ? [...new Set([...installImplementations, ...runtimeImplementations])] : [target]
-
       let removedPartialInstalls = 0
       let removedRuntimeDirs = 0
-      for (const implementationId of targets) {
-        removedPartialInstalls += yield* store.cleanupPartialInstallDirectories(implementationId)
-        removedRuntimeDirs += yield* store.cleanupOrphanedRuntimeDirectories(implementationId)
+      const installBackends = yield* listSubdirectories(paths.installDir)
+      const runtimeBackends = yield* listSubdirectories(paths.runtimeDir)
+      const backends =
+        target === undefined
+          ? [...new Set([...installBackends, ...runtimeBackends])]
+          : [...new Set([...installBackends, ...runtimeBackends, "local", "docker"])]
+
+      for (const backend of backends) {
+        const installImplementations = yield* listSubdirectories(path.resolve(paths.installDir, backend))
+        const runtimeImplementations = yield* listSubdirectories(path.resolve(paths.runtimeDir, backend))
+        const targets =
+          target === undefined ? [...new Set([...installImplementations, ...runtimeImplementations])] : [target]
+        for (const implementationId of targets) {
+          removedPartialInstalls += yield* store.cleanupPartialInstallDirectories(implementationId, backend)
+          removedRuntimeDirs += yield* store.cleanupOrphanedRuntimeDirectories(implementationId, backend)
+        }
       }
 
       let clearedCurrent = false
       const current = yield* store.readCurrentSelection
       if (current) {
-        const stillInstalled = yield* store.resolveInstalledRecord(current.implementation, current.version).pipe(
-          Effect.as(true),
-          Effect.catchAll(() => Effect.succeed(false)),
-        )
+        const stillInstalled = yield* store
+          .resolveInstalledRecord(current.implementation, current.version, current.backend)
+          .pipe(
+            Effect.as(true),
+            Effect.catchAll(() => Effect.succeed(false)),
+          )
         if (!stillInstalled) {
           yield* store.clearCurrentSelection
           clearedCurrent = true
